@@ -1,0 +1,32 @@
+$ docker compose down -v && docker compose up -d --build
+ Volume wagering_pgdata Removed 
+ Network wagering_default Removed 
+ Container wagering-migrate-1 Starting 
+ Container wagering-migrate-1 Started 
+ Container wagering-migrate-1 Waiting 
+ Container wagering-localstack-1 Waiting 
+ Container wagering-migrate-1 Exited 
+ Container wagering-localstack-1 Healthy 
+ Container wagering-app-1 Starting 
+ Container wagering-app-1 Started 
+
+$ docker compose ps -a
+SERVICE      STATUS
+app          Up 1 second
+localstack   Up 11 seconds (healthy)
+migrate      Exited (0) 9 seconds ago
+postgres     Up 11 seconds (healthy)
+
+$ docker compose logs migrate
+migrate-1  | [migrator] Processing 'Migration20261117000001InitialSchema'
+migrate-1  | [migrator] Applied 'Migration20261117000001InitialSchema'
+migrate-1  | {"msg":"migrations aplicadas","applied":["Migration20261117000001InitialSchema"]}
+
+$ docker compose logs localstack | grep init
+localstack-1  | [init] filas prontas:
+localstack-1  |   http://localhost.localstack.cloud:4566/000000000000/wager-transactions.fifo (redrive -> arn:aws:sqs:us-east-1:000000000000:wager-transactions-dlq.fifo, maxReceiveCount=5)
+localstack-1  |   http://localhost.localstack.cloud:4566/000000000000/wager-transactions-dlq.fifo
+localstack-1  |   http://localhost.localstack.cloud:4566/000000000000/wager-events.fifo
+
+$ curl localhost:3000/health/ready
+{"status":"ok","checks":{"postgres":"up","sqs":"up"}}

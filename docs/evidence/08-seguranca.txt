@@ -1,0 +1,32 @@
+# bun run test:security (test/security/abuse.test.ts) — PostgreSQL e LocalStack reais
+# executado em 2026-11-18T15:00:36
+
+[pass] ATAQUE: rajada de 100 apostas paralelas de 1.00 numa wallet de 50.00 → DEFESA: lock por wallet; exatamente 50 aceitas e saldo 0.00
+[pass] ATAQUE: REFUND + ROLLBACK + segundo REFUND da mesma aposta, AO MESMO TEMPO → DEFESA: D1 sob o lock + índice único; só 1 reversão
+[pass] ATAQUE: reverter um valor MAIOR que o apostado → DEFESA: AMOUNT_MISMATCH
+[pass] ATAQUE: desfazer a própria reversão (ROLLBACK de ROLLBACK) ou reembolsar um prêmio (REFUND de WIN) → DEFESA: REFERENCE_INVALID_KIND
+[pass] ATAQUE: ganhar, gastar o prêmio e pedir ROLLBACK do prêmio (saldo ficaria negativo) → DEFESA: REVERSAL_WOULD_OVERDRAW
+[pass] ATAQUE: crédito que estouraria NUMERIC(18,2) → DEFESA: 422 BALANCE_LIMIT_EXCEEDED, saldo intacto (não vira 500)
+[pass] ATAQUE: valores malformados para enganar o parser → DEFESA: 400 em todos, nada gravado
+[pass] ATAQUE: apostar na wallet de OUTRO jogador → DEFESA: PLAYER_MISMATCH; a vítima não é debitada
+[pass] ATAQUE: usar a aposta de OUTRO jogador como referência de REFUND na própria wallet → DEFESA: REFERENCE_MISMATCH
+[pass] ATAQUE: provedor B tenta reverter a aposta do provedor A (mesmo externalTransactionId) → DEFESA: referência é resolvida por provedor; nunca credita
+[pass] ATAQUE: moeda trocada (USD numa wallet BRL) → DEFESA: CURRENCY_MISMATCH
+[pass] ATAQUE: submeter OPENING (crédito interno de abertura) → DEFESA: 400, kind interno não é aceito
+[pass] ATAQUE: forjar status, id, saldo e failureCode no corpo (mass assignment) → DEFESA: campos fora do contrato são ignorados
+[pass] ATAQUE: provedor sem permissão (quando a autenticação existir) → DEFESA: ProviderIdentityPort recusa antes de qualquer escrita
+[pass] RISCO CONHECIDO: WIN sem referência credita direto (permitido pelo enunciado) → mitigação: autenticação + ProviderIdentityPort
+[pass] ATAQUE: reusar a Idempotency-Key de uma aposta trocando o valor → DEFESA: 409; o resultado original é preservado
+[pass] ATAQUE: mesmo externalTransactionId com outra chave (tentar aplicar 2×) → DEFESA: 409
+[pass] ATAQUE: provedor B usa a mesma chave e o mesmo id do provedor A para "ler" o resultado dele → DEFESA: chave é por provedor (D5); é outra operação
+[pass] ATAQUE: SQL injection nos campos de texto → DEFESA: queries parametrizadas; gravado literalmente, tabelas intactas
+[pass] ATAQUE: ids maliciosos na rota → DEFESA: 400 (validação de UUID antes de chegar ao banco)
+[pass] ATAQUE: corpo gigante (> 100 KB) → DEFESA: 413 PAYLOAD_TOO_LARGE
+[pass] ATAQUE: JSON malformado ou com tipo errado → DEFESA: 400
+[pass] ATAQUE: X-Correlation-Id malicioso (script, tamanho absurdo) para poluir logs → DEFESA: valor recusado e substituído por UUID
+[pass] ATAQUE: cursor e limit forjados para ler além da página ou de outra wallet → DEFESA: 400; cursor só filtra dentro da wallet
+[pass] ATAQUE: path traversal nos arquivos do Swagger → DEFESA: lista fechada de arquivos (404)
+[pass] ATAQUE: mensagem SQS com kind OPENING ou sem idempotencyKey → DEFESA: payload inválido (vai à DLQ, sem linha)
+[pass] sanidade: brl() produz Money com 2 casas
+
+27 pass, 0 fail

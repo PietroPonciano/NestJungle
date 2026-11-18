@@ -1,0 +1,59 @@
+{
+  "name": "distributed-wagering-processor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Serviço financeiro distribuído de processamento de apostas (BET/WIN/LOSS/REFUND/ROLLBACK).",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "dev": "bun --watch src/main.ts",
+    "start": "bun dist/main.js",
+    "build": "bun run typecheck && bun build src/main.ts src/cli/migrate.ts --root=src --target=bun --packages=external --outdir=dist",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "migrate:up": "bun src/cli/migrate.ts up",
+    "migrate:down": "bun src/cli/migrate.ts down",
+    "migrate:status": "bun src/cli/migrate.ts status",
+    "test:infra": "docker compose up -d --wait postgres localstack",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "test:concurrency": "bun test test/concurrency",
+    "test:security": "bun test test/security",
+    "test:load": "bun test/load/load-test.ts",
+    "openapi:export": "bun src/cli/export-openapi.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.1171.0",
+    "@mikro-orm/core": "7.2.10",
+    "@mikro-orm/migrations": "7.2.10",
+    "@mikro-orm/postgresql": "7.2.10",
+    "@nestjs/common": "12.5.1",
+    "@nestjs/core": "12.5.1",
+    "@nestjs/platform-express": "12.5.1",
+    "decimal.js": "10.6.0",
+    "prom-client": "15.1.3",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "swagger-ui-dist": "5.35.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/bun": "1.4.4",
+    "@types/express": "5.0.6",
+    "@types/pg": "^8.23.1",
+    "@types/swagger-ui-dist": "3.30.6",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "eslint": "10.0.1",
+    "eslint-config-prettier": "10.1.8",
+    "pg": "8.23.1",
+    "prettier": "3.10.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.73.0"
+  }
+}

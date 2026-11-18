@@ -1,0 +1,295 @@
+/**
+ * Consumidor da fila wager-transactions.fifo (enunciado §10; guia §8.4).
+ *
+ * Garantias:
+ *  - Mesmo use case da entrada HTTP; deduplicação pela inbox persistente,
+ *    dentro da MESMA transação do efeito.
+ *  - Ack (DeleteMessage) SOMENTE depois do commit. Se o processo morrer entre
+ *    o commit e o ack, a redelivery encontra a inbox/transação e vira replay,
+ *    sem duplicar o efeito.
+ *  - O SQS não tem NACK: retry = não apagar + ChangeMessageVisibility com
+ *    backoff exponencial e jitter (base 5 s, teto 5 min).
+ *  - Classificação:
+ *      negócio (REJECTED) e replay          -> ack
+ *      transitório                          -> sem ack; retry com backoff;
+ *                                              na última tentativa grava FAILED
+ *                                              RETRY_LIMIT_EXCEEDED (E4) e manda à DLQ
+ *      payload inválido / wallet inexistente
+ *      / conflito de idempotência ou inbox  -> DLQ explícita + ack (sem linha)
+ *      FAILED (erro permanente gravado)     -> DLQ explícita + ack
+ *  - Mensagens processadas em sequência dentro do lote: o FIFO entrega em
+ *    ordem por MessageGroupId (= walletId). Várias instâncias dividem os
+ *    grupos entre si.
+ *  - SIGTERM (stop): para de buscar, conclui a mensagem em andamento (commit +
+ *    ack) e devolve a visibilidade (timeout 0) das que ainda não começaram.
+ */
+import {
+  ChangeMessageVisibilityCommand,
+  DeleteMessageCommand,
+  type Message,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+  type SQSClient,
+} from '@aws-sdk/client-sqs';
+import {
+  ApplicationError,
+  IdempotencyConflictError,
+  InboxConflictError,
+  InvalidPayloadError,
+  TransientInfrastructureError,
+  WalletNotFoundError,
+} from '../../application/errors';
+import type { SubmitWagerTransactionUseCase } from '../../application/use-cases/submit-wager-transaction';
+import { WagerTransactionStatus } from '../../domain/wager-transaction/wager-transaction-kind';
+import {
+  type ParsedWagerMessage,
+  parseWagerMessage,
+  peekMessageId,
+} from '../../interfaces/messaging/wager-message';
+import type { AppLogger } from '../../shared/logger';
+import type { AppConfig } from '../config/app-config';
+
+export interface ConsumerObserver {
+  onRetry(): void;
+  onDeadLetter(reason: string): void;
+  onProcessingTime(seconds: number): void;
+}
+
+const NOOP_OBSERVER: ConsumerObserver = {
+  onRetry: () => undefined,
+  onDeadLetter: () => undefined,
+  onProcessingTime: () => undefined,
+};
+
+type Disposition =
+  | { type: 'ack' }
+  | { type: 'retry'; delaySeconds: number }
+  | { type: 'dead-letter'; reason: string };
+
+export class SqsWagerConsumer {
+  private running = false;
+  private loop: Promise<void> | undefined;
+
+  constructor(
+    private readonly sqs: SQSClient,
+    private readonly config: AppConfig['sqs'],
+    private readonly submit: SubmitWagerTransactionUseCase,
+    private readonly logger: AppLogger,
+    private readonly observer: ConsumerObserver = NOOP_OBSERVER,
+    private readonly faults: AppConfig['faults'] = { crashAfterCommitBeforeAck: false },
+  ) {}
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.loop = this.pollLoop();
+  }
+
+  /**
+   * SIGTERM: termina a mensagem atual e devolve as não iniciadas.
+   * O long poll em andamento NÃO é abortado: abortar só do lado do cliente
+   * deixa a requisição viva no servidor, e ela pode "receber" mensagens que
+   * ninguém processa (ficam invisíveis até o visibility timeout). Esperamos ele
+   * terminar (no máximo WaitTimeSeconds) e devolvemos o que chegar.
+   */
+  async stop(): Promise<void> {
+    this.running = false;
+    await this.loop;
+  }
+
+  private isRunning(): boolean {
+    return this.running;
+  }
+
+  private async pollLoop(): Promise<void> {
+    while (this.running) {
+      let messages: Message[];
+      try {
+        const response = await this.sqs.send(
+          new ReceiveMessageCommand({
+            QueueUrl: this.config.transactionsQueueUrl,
+            MaxNumberOfMessages: 10,
+            WaitTimeSeconds: this.config.waitTimeSeconds, // long polling
+            VisibilityTimeout: this.config.visibilityTimeoutSeconds,
+            MessageSystemAttributeNames: ['ApproximateReceiveCount', 'MessageGroupId'],
+          }),
+        );
+        messages = response.Messages ?? [];
+      } catch (error: unknown) {
+        this.logger.warn('falha ao receber da fila; tentando de novo', { error: String(error) });
+        await Bun.sleep(1000);
+        continue;
+      }
+
+      for (const [index, message] of messages.entries()) {
+        // Método (e não o campo) porque stop() pode ter mudado o estado durante o await.
+        if (!this.isRunning()) {
+          // Shutdown: devolve imediatamente as mensagens que não começaram.
+          await this.releaseAll(messages.slice(index));
+          break;
+        }
+        await this.handle(message);
+      }
+    }
+  }
+
+  /** Processa uma mensagem. Público para os testes de integração. */
+  async handle(message: Message): Promise<void> {
+    const started = performance.now();
+    const receiveCount = Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? '1', 10);
+    // No SQS o messageId é também o correlationId (propagado para os eventos).
+    const messageId = peekMessageId(message.Body);
+    const sqsLog = this.logger.child({ correlationId: messageId, messageId, receiveCount });
+    let parsed: ParsedWagerMessage | undefined;
+    let disposition: Disposition;
+
+    try {
+      parsed = parseWagerMessage(message.Body);
+      const { command, messageId, payloadHash } = parsed;
+      const outcome = await this.submit.execute(
+        command,
+        { correlationId: messageId, causationId: messageId },
+        { consumerName: this.config.consumerName, messageId, payloadHash },
+      );
+      sqsLog.info('mensagem processada', {
+        transactionId: outcome.result.transactionId,
+        walletId: command.walletId,
+        providerId: command.providerId,
+        status: outcome.result.status,
+        failureCode: outcome.result.failureCode,
+        idempotentReplay: outcome.result.idempotentReplay,
+        duplicateMessage: outcome.duplicateMessage,
+      });
+      disposition =
+        outcome.result.status === WagerTransactionStatus.Failed
+          ? { type: 'dead-letter', reason: outcome.result.failureCode ?? 'FAILED' }
+          : { type: 'ack' };
+    } catch (error: unknown) {
+      disposition = await this.classify(error, parsed, receiveCount, sqsLog);
+    }
+
+    await this.apply(message, disposition, sqsLog);
+    this.observer.onProcessingTime((performance.now() - started) / 1000);
+  }
+
+  private async classify(
+    error: unknown,
+    parsed: ParsedWagerMessage | undefined,
+    receiveCount: number,
+    log: AppLogger,
+  ): Promise<Disposition> {
+    if (error instanceof TransientInfrastructureError) {
+      if (receiveCount >= this.config.maxReceiveCount && parsed !== undefined) {
+        // E4: última tentativa permitida. Se o banco aceitar, registra FAILED auditável.
+        const recorded = await this.submit.recordRetryLimitExceeded(parsed.command, {
+          consumerName: this.config.consumerName,
+          messageId: parsed.messageId,
+          payloadHash: parsed.payloadHash,
+        });
+        if (recorded !== undefined) return { type: 'dead-letter', reason: 'RETRY_LIMIT_EXCEEDED' };
+      }
+      log.warn('erro transitório; mensagem volta para a fila', { error: error.message });
+      return { type: 'retry', delaySeconds: this.backoffSeconds(receiveCount) };
+    }
+    if (
+      error instanceof InvalidPayloadError ||
+      error instanceof WalletNotFoundError ||
+      error instanceof IdempotencyConflictError ||
+      error instanceof InboxConflictError
+    ) {
+      log.warn('mensagem permanentemente inválida; enviando à DLQ', { code: error.code });
+      return { type: 'dead-letter', reason: error.code };
+    }
+    if (error instanceof ApplicationError) {
+      return { type: 'dead-letter', reason: error.code };
+    }
+    // Inesperado fora do use case (que já converte inesperados em FAILED):
+    // tratamos como transitório. A redrive limita as tentativas.
+    log.error('erro inesperado no consumidor', { error: String(error) });
+    return { type: 'retry', delaySeconds: this.backoffSeconds(receiveCount) };
+  }
+
+  private async apply(message: Message, disposition: Disposition, log: AppLogger): Promise<void> {
+    try {
+      switch (disposition.type) {
+        case 'ack':
+          if (this.faults.crashAfterCommitBeforeAck) {
+            // Injeção de falha (só em teste): o commit já aconteceu e o processo
+            // morre antes do ack. A redelivery precisa ser absorvida pela inbox.
+            log.warn('FAULT: matando o processo depois do commit e antes do ack');
+            process.kill(process.pid, 'SIGKILL');
+          }
+          // Ack SÓ depois do commit (o use case já retornou = já comitou).
+          await this.delete(message);
+          return;
+        case 'retry':
+          this.observer.onRetry();
+          await this.sqs.send(
+            new ChangeMessageVisibilityCommand({
+              QueueUrl: this.config.transactionsQueueUrl,
+              ReceiptHandle: message.ReceiptHandle,
+              VisibilityTimeout: disposition.delaySeconds,
+            }),
+          );
+          return;
+        case 'dead-letter':
+          // DLQ primeiro, ack depois. Se morrer no meio, a redelivery reenvia
+          // à DLQ com o mesmo MessageDeduplicationId (o FIFO deduplica).
+          await this.sqs.send(
+            new SendMessageCommand({
+              QueueUrl: this.config.transactionsDlqUrl,
+              MessageBody: message.Body ?? '',
+              MessageGroupId: message.Attributes?.MessageGroupId ?? 'unknown',
+              MessageDeduplicationId: message.MessageId ?? crypto.randomUUID(),
+              MessageAttributes: {
+                failureReason: { DataType: 'String', StringValue: disposition.reason },
+              },
+            }),
+          );
+          this.observer.onDeadLetter(disposition.reason);
+          await this.delete(message);
+          return;
+      }
+    } catch (error: unknown) {
+      // Falhar no ack/DLQ não perde nada: a mensagem reaparece após o
+      // visibility timeout e a inbox absorve o reprocessamento.
+      log.error('falha ao confirmar mensagem no SQS', {
+        error: String(error),
+        disposition: disposition.type,
+      });
+    }
+  }
+
+  private async delete(message: Message): Promise<void> {
+    await this.sqs.send(
+      new DeleteMessageCommand({
+        QueueUrl: this.config.transactionsQueueUrl,
+        ReceiptHandle: message.ReceiptHandle,
+      }),
+    );
+  }
+
+  private async releaseAll(messages: Message[]): Promise<void> {
+    await Promise.all(
+      messages.map((m) =>
+        this.sqs
+          .send(
+            new ChangeMessageVisibilityCommand({
+              QueueUrl: this.config.transactionsQueueUrl,
+              ReceiptHandle: m.ReceiptHandle,
+              VisibilityTimeout: 0,
+            }),
+          )
+          .catch(() => undefined),
+      ),
+    );
+  }
+
+  /** Backoff exponencial com jitter: base·2^(n-1) + [0, base), teto max. */
+  private backoffSeconds(receiveCount: number): number {
+    const base = this.config.retryBaseSeconds;
+    const exponential = base * 2 ** Math.max(0, Math.min(receiveCount - 1, 20));
+    const jitter = Math.floor(Math.random() * base);
+    return Math.min(exponential + jitter, this.config.retryMaxSeconds);
+  }
+}

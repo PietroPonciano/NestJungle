@@ -1,0 +1,43 @@
+# Restrição #1: nenhum number/float/double para dinheiro
+$ grep -rnE 'parseFloat|toNumber\(\)|Number\([^)]*(amount|balance|money)' src  (esperado: nada)
+(nenhuma ocorrência)
+
+$ grep -rnE '(amount|balance|balanceBefore|balanceAfter|observedBalance)\??: *number' src  (esperado: nada)
+(nenhuma ocorrência)
+
+$ grep -rniE 'float|double|real ' migrations docs/001_initial_schema.sql  (esperado: nada)
+docs/001_initial_schema.sql:10:-- Dinheiro: NUMERIC(18,2) (exato, escala 2). Nunca float/double.
+
+# Restrição #2: nenhum cache em memória para idempotência
+$ grep -rnE 'new (Map|Set)<|LRU|cache' src  (esperado: só estruturas locais de uma iteração)
+src/application/use-cases/publish-outbox.ts:51:      const blockedAggregates = new Set<string>();
+src/infrastructure/persistence/db-errors.ts:8:const TRANSIENT_SQLSTATES = new Set([
+src/infrastructure/persistence/db-errors.ts:20:const TRANSIENT_NODE_CODES = new Set([
+src/domain/messaging/inbox-message.ts:6: *    (consumer_name, message_id)), nunca um cache em memória.
+
+# Restrição #4: único caminho que publica no SQS de eventos
+$ grep -rn 'SendMessageCommand' src
+src/infrastructure/messaging/sqs-wager-consumer.ts:31:  SendMessageCommand,
+src/infrastructure/messaging/sqs-wager-consumer.ts:237:            new SendMessageCommand({
+src/infrastructure/messaging/sqs.ts:9:import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+src/infrastructure/messaging/sqs.ts:43:      new SendMessageCommand({
+
+# Restrição #6: nenhum lock global (advisory lock, LOCK TABLE, mutex)
+$ grep -rniE 'pg_advisory|LOCK TABLE|mutex|semaphore' src (esperado: nada)
+(nenhuma ocorrência)
+
+# Locks usados
+src/application/use-cases/pending-reference-processor.ts:12   *  - O claim das vencidas usa FOR UPDATE SKIP LOCKED + lease (empurra
+src/application/ports/repositories.ts:11   *  - claimDue / lockDuePendingReferences: FOR UPDATE SKIP LOCKED, para várias
+src/application/ports/repositories.ts:87    /** Pendentes e devidas, travadas com FOR UPDATE SKIP LOCKED. */
+src/application/use-cases/publish-outbox.ts:9   *    reivindicado com FOR UPDATE SKIP LOCKED, então cada linha fica com no
+src/infrastructure/persistence/mikro-orm-repositories.ts:72        { lockMode: LockMode.PESSIMISTIC_WRITE, refresh: true },
+src/infrastructure/persistence/mikro-orm-repositories.ts:149        { lockMode: LockMode.PESSIMISTIC_WRITE, refresh: true },
+src/infrastructure/persistence/mikro-orm-repositories.ts:197      // Claim com lease: várias instâncias rodam o worker. FOR UPDATE SKIP LOCKED
+src/infrastructure/persistence/mikro-orm-repositories.ts:209             FOR UPDATE SKIP LOCKED)
+src/infrastructure/persistence/mikro-orm-repositories.ts:356      // Publishers concorrentes (Restrição #8): FOR UPDATE SKIP LOCKED faz cada
+src/infrastructure/persistence/mikro-orm-repositories.ts:367        .setLockMode(LockMode.PESSIMISTIC_PARTIAL_WRITE)
+
+# TypeScript estrito / sem any
+$ grep -rnE ': any|as any|<any>' src test (esperado: nada)
+(nenhuma ocorrência)

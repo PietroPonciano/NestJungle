@@ -1,0 +1,12 @@
+# Restrição #5: ledger imutável no banco do compose (tentativas diretas via psql)
+$ UPDATE wallet_ledger_entries SET amount = 1
+ERROR:  wallet_ledger_entries é imutável (UPDATE bloqueado)
+$ DELETE FROM wallet_ledger_entries
+ERROR:  wallet_ledger_entries é imutável (DELETE bloqueado)
+$ TRUNCATE wallet_ledger_entries
+ERROR:  wallet_ledger_entries é imutável (TRUNCATE bloqueado)
+$ INSERT INTO wallets (id, player_id, currency, balance) VALUES (gen_random_uuid(), gen_random_uuid(), 'BRL', -1)
+ERROR:  new row for relation "wallets" violates check constraint "wallets_balance_check"
+$ SELECT COUNT(*) FROM wallet_ledger_entries
+     2
+

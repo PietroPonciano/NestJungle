@@ -1,0 +1,72 @@
+===== Execução 1: bun test (unit + integration + concurrency) =====
+test/integration/observability.test.ts:
+test/integration/http-api.test.ts:
+test/integration/schema-constraints.test.ts:
+test/integration/sqs-consumer.test.ts:
+test/integration/locking.test.ts:
+test/integration/create-wallet.test.ts:
+test/integration/migration.test.ts:
+test/integration/submit-wager.test.ts:
+test/integration/reconciliation.test.ts:
+test/integration/outbox.test.ts:
+test/integration/pending-reference.test.ts:
+test/integration/health-live.test.ts:
+test/integration/atomicity.test.ts:
+test/concurrency/crash-recovery.test.ts:
+[cenário 8] processadas antes do kill -9: 18/30; restante concluído pela nova instância
+test/concurrency/multi-instance.test.ts:
+[cenário 4] instâncias que consumiram mensagens: A, B, C
+[cenário 6] 368 eventos; instâncias que publicaram: A, B, C
+ 251 pass
+ 0 fail
+ 1103 expect() calls
+Ran 251 tests across 25 files. [39.47s]
+
+===== Execução 2: bun test (unit + integration + concurrency) =====
+test/integration/observability.test.ts:
+test/integration/http-api.test.ts:
+test/integration/schema-constraints.test.ts:
+test/integration/sqs-consumer.test.ts:
+test/integration/locking.test.ts:
+test/integration/create-wallet.test.ts:
+test/integration/migration.test.ts:
+test/integration/submit-wager.test.ts:
+test/integration/reconciliation.test.ts:
+test/integration/outbox.test.ts:
+test/integration/pending-reference.test.ts:
+test/integration/health-live.test.ts:
+test/integration/atomicity.test.ts:
+test/concurrency/crash-recovery.test.ts:
+[cenário 8] processadas antes do kill -9: 18/30; restante concluído pela nova instância
+test/concurrency/multi-instance.test.ts:
+[cenário 4] instâncias que consumiram mensagens: A, B, C
+[cenário 6] 368 eventos; instâncias que publicaram: A, B, C
+ 251 pass
+ 0 fail
+ 1103 expect() calls
+Ran 251 tests across 25 files. [38.99s]
+
+===== Execução 3: bun test (unit + integration + concurrency) =====
+test/integration/observability.test.ts:
+test/integration/http-api.test.ts:
+test/integration/schema-constraints.test.ts:
+test/integration/sqs-consumer.test.ts:
+test/integration/locking.test.ts:
+test/integration/create-wallet.test.ts:
+test/integration/migration.test.ts:
+test/integration/submit-wager.test.ts:
+test/integration/reconciliation.test.ts:
+test/integration/outbox.test.ts:
+test/integration/pending-reference.test.ts:
+test/integration/health-live.test.ts:
+test/integration/atomicity.test.ts:
+test/concurrency/crash-recovery.test.ts:
+[cenário 8] processadas antes do kill -9: 16/30; restante concluído pela nova instância
+test/concurrency/multi-instance.test.ts:
+[cenário 4] instâncias que consumiram mensagens: A, B, C
+[cenário 6] 368 eventos; instâncias que publicaram: A, B, C
+ 251 pass
+ 0 fail
+ 1103 expect() calls
+Ran 251 tests across 25 files. [40.00s]
+

@@ -1,0 +1,29 @@
+== estado no banco (wallet 01a1ebd3-d27e-7107-bd08-6b7c298202f7) ==
+  kind   |  status   |    failure_code    | observed_balance 
+---------+-----------+--------------------+------------------
+ OPENING | PROCESSED |                    |           100.00
+ BET     | PROCESSED |                    |            20.00
+ BET     | REJECTED  | INSUFFICIENT_FUNDS |            20.00
+(3 rows)
+
+ direction | amount | balance_before | balance_after 
+-----------+--------+----------------+---------------
+ CREDIT    | 100.00 |           0.00 |        100.00
+ DEBIT     |  80.00 |         100.00 |         20.00
+(2 rows)
+
+ balance | version 
+---------+---------
+   20.00 |       2
+(1 row)
+
+ message_id | processed 
+------------+-----------
+ audit-m1   | t
+(1 row)
+
+ outbox_pendentes 
+------------------
+                0
+(1 row)
+

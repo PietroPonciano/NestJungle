@@ -1,0 +1,303 @@
+# bun test --reporter=junit (código final) — testes por arquivo e nome
+
+
+## test/unit/wager-transaction.test.ts
+  [pass] nasce PENDING, sem failureCode, sem processedAt, attempts 0
+  [pass] OPENING não pode ser submetido via create
+  [pass] REFUND e ROLLBACK exigem referência; WIN não exige
+  [pass] requiresReference por kind
+  [pass] hasReference: WIN só quando informada; LOSS ignora referência
+  [pass] LOSS aceita 0; demais exigem > 0 (D4)
+  [pass] campos de identidade obrigatórios
+  [pass] affectsBalance: false só para LOSS
+  [pass] matchesPayload compara o hash
+  [pass] usa identidade interna determinística (E3) e kind OPENING
+  [pass] PENDING -> PROCESSED (com observedBalance e processedAt)
+  [pass] PENDING -> PROCESSED para LOSS
+  [pass] PENDING -> REJECTED com código de negócio
+  [pass] PENDING -> FAILED com código permanente
+  [pass] PENDING -> PENDING_REFERENCE com agenda (nextAttemptAt e expiresAt)
+  [pass] PENDING_REFERENCE -> PENDING_REFERENCE (reagendamento incrementa attempts)
+  [pass] PENDING_REFERENCE -> PROCESSED / REJECTED / FAILED
+  [pass] processed é terminal: qualquer transição lança InvalidTransactionStateError
+  [pass] rejected é terminal: qualquer transição lança InvalidTransactionStateError
+  [pass] failed é terminal: qualquer transição lança InvalidTransactionStateError
+  [pass] PENDING_REFERENCE -> PENDING_REFERENCE via markPendingReference é inválido
+  [pass] scheduleReferenceRetry fora de PENDING_REFERENCE é inválido
+  [pass] PENDING_REFERENCE sem referência a aguardar é inválido
+  [pass] REJECTED exige código de negócio; FAILED exige código permanente
+  [pass] REFUND/ROLLBACK não podem ser processados sem referência resolvida
+  [pass] BET debita; WIN e REFUND creditam
+  [pass] ROLLBACK inverte a direção da referência
+  [pass] ROLLBACK sem referência, de LOSS ou de ROLLBACK é erro; LOSS não tem direção
+  [pass] backoff 2s, fator 2, teto 5 min
+  [pass] esgota por tentativas OU por TTL, o que vier primeiro
+
+## test/unit/payload-hash.test.ts
+  [pass] ordena chaves recursivamente e não tem espaços
+  [pass] independe da ordem de inserção das chaves
+  [pass] omite undefined e preserva UTF-8
+  [pass] rejeita NaN/Infinity
+  [pass] é o SHA-256 do JSON canônico documentado (vetor de referência)
+  [pass] determinístico e normaliza amount para 2 casas ("25" == "25.00")
+  [pass] qualquer campo de negócio diferente muda o hash (payload divergente = conflito)
+  [pass] idempotency key e metadados de transporte não entram no hash
+  [pass] mesma key com payload diferente: matchesPayload falso (conflito, não replay)
+
+## test/unit/money.test.ts
+  [pass] serializa sempre com 2 casas
+  [pass] aritmética decimal exata (sem erro de ponto flutuante)
+  [pass] não arredonda: mais de 2 casas é rejeitado, nunca truncado
+  [pass] imutável: operações devolvem novas instâncias
+  [pass] negate, isZero, isPositive, isNegative, isLessThan, equals
+  [pass] rejeita amount "NaN"
+  [pass] rejeita amount "Infinity"
+  [pass] rejeita amount "-Infinity"
+  [pass] rejeita amount "1e3"
+  [pass] rejeita amount "1E-2"
+  [pass] rejeita amount ""
+  [pass] rejeita amount " "
+  [pass] rejeita amount " 1.00"
+  [pass] rejeita amount "1.00 "
+  [pass] rejeita amount "+1.00"
+  [pass] rejeita amount "01.00"
+  [pass] rejeita amount "1."
+  [pass] rejeita amount ".5"
+  [pass] rejeita amount "1,00"
+  [pass] rejeita amount "0x10"
+  [pass] rejeita amount "1.234"
+  [pass] rejeita amount "10000000000000000.00"
+  [pass] rejeita tipos que não são string (JSON não confiável)
+  [pass] rejeita moeda fora do ISO-4217
+  [pass] fromInput rejeita negativos; from aceita (uso interno)
+  [pass] resultado de operação que estoura NUMERIC(18,2) é rejeitado
+  [pass] add/subtract/isLessThan entre moedas diferentes lançam erro de domínio
+
+## test/unit/integration-events.test.ts
+  [pass] WalletBalanceChanged: envelope do enunciado, com MoneyProps e eventType/version no tipo
+  [pass] payload é JSON puro e estável (sem instâncias de Money)
+  [pass] causationId omitido quando ausente
+  [pass] data é imutável
+  [pass] Processed só de PROCESSED; Rejected só de REJECTED; PendingReference só de PENDING_REFERENCE
+  [pass] Rejected carrega failureCode
+  [pass] PendingReference carrega referência e expiresAt ISO
+  [pass] WalletBalanceChanged rejeita lançamento de outra wallet
+
+## test/unit/wallet.test.ts
+  [pass] com saldo inicial: version 1 e lançamento CREDIT de OPENING
+  [pass] saldo inicial zero: sem lançamento (D3)
+  [pass] saldo inicial negativo é rejeitado
+  [pass] debit reduz saldo, incrementa version e devolve lançamento balanceado
+  [pass] credit aumenta saldo e incrementa version
+  [pass] debit que deixaria saldo negativo é rejeitado sem mudar estado
+  [pass] debit do saldo exato zera a wallet (permitido)
+  [pass] conflito de moeda em debit, credit e canDebit
+  [pass] valor zero não gera lançamento nem muda version
+  [pass] version só incrementa quando o saldo muda (consultas não incrementam)
+  [pass] rehydrate reconstrói estado sem revalidar
+
+## test/unit/inbox-outbox.test.ts
+  [pass] enqueue: id = eventId, payload = envelope, pendente e devido imediatamente
+  [pass] scheduleRetry: backoff 1s, 2s, 4s ... com teto de 5 min, sem descartar
+  [pass] markPublished uma única vez; depois não é pendente nem devido
+  [pass] receive: não processada; markProcessed uma única vez
+  [pass] mesmo messageId com payload diferente é conflito
+  [pass] messageId e consumerName obrigatórios
+
+## test/unit/wallet-ledger-entry.test.ts
+  [pass] create valida aritmética de DEBIT e CREDIT
+  [pass] aritmética que não fecha é rejeitada
+  [pass] valor zero (LOSS) ou negativo não gera lançamento
+  [pass] saldo negativo antes ou depois é rejeitado
+  [pass] moedas divergentes são rejeitadas
+  [pass] imutabilidade estrutural: sem setters nem métodos de transição
+
+## test/unit/architecture.test.ts
+  [pass] domínio puro: nenhum import de NestJS, MikroORM, AWS SDK ou pg
+  [pass] Restrição #1: nenhuma conversão de dinheiro para number (parseFloat, toNumber, Number(amount))
+  [pass] todo arquivo de domínio começa com bloco de invariantes/documentação
+
+## test/unit/failure-code.test.ts
+  [pass] todo código tem especificação, e os valores são estáveis (iguais ao nome do contrato)
+  [pass] negócio (REJECTED/422) × permanente (FAILED/500)
+  [pass] sem códigos de duplicata, de transitório, WALLET_NOT_FOUND ou INVALID_PAYLOAD (D7)
+  [pass] REVERSAL_WOULD_OVERDRAW é distinto de INSUFFICIENT_FUNDS (regra 9)
+
+## test/unit/wager-settlement.test.ts
+  [pass] debita e gera 1 lançamento DEBIT; observedBalance é o saldo após
+  [pass] cenário 100.00 + 2×80.00: 1 PROCESSED, 1 REJECTED INSUFFICIENT_FUNDS, saldo 20.00, 1 débito
+  [pass] sem referência: credita direto
+  [pass] com referência à BET da mesma rodada: credita e guarda referenceTransactionId
+  [pass] com referência informada e ainda inexistente: PENDING_REFERENCE (E2)
+  [pass] referência que não é BET: REFERENCE_INVALID_KIND
+  [pass] PROCESSED sem mover saldo e sem lançamento
+  [pass] reverte BET PROCESSED: credita o valor
+  [pass] só referencia BET (regra 3)
+  [pass] valor diferente da referência: AMOUNT_MISMATCH (regra 5)
+  [pass] referência já revertida: ALREADY_REVERSED (regra 4 / D1)
+  [pass] de BET: credita (inverso do débito)
+  [pass] de WIN: debita (inverso do crédito)
+  [pass] de REFUND: debita (inverso do crédito do REFUND)
+  [pass] de LOSS ou de outro ROLLBACK: REFERENCE_INVALID_KIND
+  [pass] reversão que deixaria saldo negativo: REVERSAL_WOULD_OVERDRAW (≠ INSUFFICIENT_FUNDS)
+  [pass] rodada diferente: REFERENCE_MISMATCH
+  [pass] wallet/player da referência diferentes: REFERENCE_MISMATCH
+  [pass] provider diferente: REFERENCE_MISMATCH (defensivo; a busca já filtra por provider)
+  [pass] referência PENDING / PENDING_REFERENCE: aguarda
+  [pass] referência REJECTED: REFERENCE_NOT_PROCESSED na hora (D2)
+  [pass] moeda da operação ≠ moeda da wallet: CURRENCY_MISMATCH
+  [pass] playerId ≠ player da wallet: PLAYER_MISMATCH
+  [pass] referência chega depois: PENDING_REFERENCE → PROCESSED
+  [pass] referência ausente em nova tentativa: reagenda com backoff
+  [pass] esgotado o TTL: REJECTED REFERENCE_NOT_FOUND sem mover saldo
+  [pass] esgotado o limite de tentativas: REJECTED REFERENCE_NOT_FOUND
+  [pass] transação terminal, wallet errada: erro de programação
+
+## test/integration/observability.test.ts
+  [pass] logs JSON correlacionados: requisição -> transação -> evento publicado
+  [pass] métricas refletem o tráfego (transações por status, duplicatas, latência, outbox)
+
+## test/integration/http-api.test.ts
+  [pass] 201 criada (contrato do enunciado) com X-Correlation-Id
+  [pass] 409 duplicada (player + moeda)
+  [pass] 400 inválida: amount number, negativo, 3 casas, playerId não-UUID, JSON malformado
+  [pass] 201 processada (primeira vez)
+  [pass] 200 replay idêntico de transação processada, com idempotentReplay true
+  [pass] 202 PENDING_REFERENCE (referência ausente) com saldo atual
+  [pass] 422 rejeição de negócio com failureCode; replay = o mesmo 422 com idempotentReplay
+  [pass] 400 payload inválido e header ausente
+  [pass] 409 mesma key com payload diferente; 409 mesmo externalTransactionId com key diferente
+  [pass] 404 wallet inexistente
+  [pass] 500 falha permanente inesperada (FAILED auditável)
+  [pass] 503 falha transitória (lock da wallet além do lock_timeout) com Retry-After; reenvio com a mesma key funciona
+  [pass] GET /wallets/:id (200, 404, 400)
+  [pass] GET /wallets/:id/ledger: cursor opaco e estável, sem repetição nem buraco
+  [pass] GET /wagering/transactions/:id e /providers/:p/wagering/transactions/:ext
+
+## test/integration/schema-constraints.test.ts
+  [pass] ck balance >= 0
+  [pass] ck currency ISO-4217
+  [pass] ck version >= 1 e default 1
+  [pass] uq_wallets_player_currency
+  [pass] UPDATE que deixaria saldo negativo é recusado (rede de segurança da Restrição #7)
+  [pass] NUMERIC(18,2): mais de 16 dígitos inteiros estoura (22003)
+  [pass] FK wallet_id
+  [pass] ck kind
+  [pass] ck status
+  [pass] ck currency
+  [pass] uq_tx_provider_external (idempotência persistente)
+  [pass] uq_tx_provider_idempotency (D5: por provedor)
+  [pass] ck_tx_amount: BET 0 e negativo recusados; LOSS 0 aceito (D4)
+  [pass] ck_tx_reference_required: REFUND/ROLLBACK sem referência; WIN sem referência ok
+  [pass] ck_tx_failure_code: REJECTED/FAILED exigem código; demais estados proíbem
+  [pass] ck_tx_processed_at: só e sempre em PROCESSED
+  [pass] FK reference_transaction_id
+  [pass] uq_tx_single_reversal (D1): REFUND e ROLLBACK PROCESSED da mesma BET
+  [pass] NOT NULL em campos de identidade
+  [pass] lançamento válido é aceito e recebe seq (identity)
+  [pass] seq é GENERATED ALWAYS: valor explícito é recusado
+  [pass] FK wallet_id e transaction_id
+  [pass] ck direction
+  [pass] ck amount > 0 (LOSS/REJECTED nunca lançam)
+  [pass] ck balance_before >= 0 e balance_after >= 0
+  [pass] ck_ledger_balanced: aritmética conferida pelo banco
+  [pass] uq_ledger_wallet_tx: no máximo um lançamento por wallet por transação
+  [pass] Restrição #5: UPDATE, DELETE e TRUNCATE no ledger falham
+  [pass] inbox PK (consumer_name, message_id); ON CONFLICT DO NOTHING devolve 0 linhas
+  [pass] outbox PK = eventId; next_attempt_at default now()
+
+## test/integration/sqs-consumer.test.ts
+  [pass] processa a mensagem com o mesmo use case, grava inbox e dá ack após o commit
+  [pass] redelivery (mesmo messageId, dedup SQS diferente — Restrição #3): 1 efeito, ambos ack
+  [pass] mesma operação em messageIds diferentes: banco garante 1 efeito
+  [pass] rejeição de negócio: REJECTED gravado e ack (não vai à DLQ)
+  [pass] payload inválido: DLQ explícita, sem linha de transação (D7)
+  [pass] wallet inexistente: DLQ, sem linha
+  [pass] transitório (lock da wallet seguro por outra conexão): sem ack, retry com backoff, depois processa 1×
+  [pass] worker morreu depois do commit e antes do ack: redelivery vira replay (inbox)
+  [pass] SIGTERM (stop): nenhuma mensagem perdida; ao religar, cada uma processada 1×
+  [pass] última tentativa com erro transitório: FAILED RETRY_LIMIT_EXCEEDED auditável + DLQ (E4)
+
+## test/integration/locking.test.ts
+  [pass] mesma wallet: a segunda transação espera o commit da primeira (sem lost update)
+  [pass] wallets distintas: lock de A não bloqueia B (Restrição #6)
+  [pass] espera além do lock_timeout vira TransientInfrastructureError (nada gravado)
+  [pass] wallet: round-trip preserva Money exato (string, nunca number)
+  [pass] wallet duplicada (player + moeda) vira WalletAlreadyExistsError
+  [pass] wallet inexistente: lockById devolve undefined
+
+## test/integration/create-wallet.test.ts
+  [pass] saldo inicial > 0: wallet v1 + OPENING PROCESSED + CREDIT + 2 eventos, atômicos
+  [pass] saldo inicial zero: só a wallet, sem OPENING, lançamento ou evento (D3)
+  [pass] duplicata (player + moeda): WalletAlreadyExistsError e nada órfão gravado
+  [pass] duplicata concorrente: 10 criações simultâneas do mesmo player → exatamente 1 wallet
+
+## test/integration/migration.test.ts
+  [pass] o UP aplicado é idêntico ao bloco UP de docs/001_initial_schema.sql
+  [pass] up cria as 5 tabelas, triggers e índices; down remove tudo; up de novo funciona
+
+## test/integration/submit-wager.test.ts
+  [pass] BET processada: PROCESSED, saldo, 1 DEBIT, eventos Processed + BalanceChanged
+  [pass] replay idêntico: mesmo resultado original, idempotentReplay true, sem novo débito
+  [pass] mesma key com payload diferente: 409 (conflito, não replay)
+  [pass] mesmo externalTransactionId com key diferente: 409 (D5)
+  [pass] saldo insuficiente: REJECTED INSUFFICIENT_FUNDS (422), auditável, sem lançamento
+  [pass] LOSS: PROCESSED sem mover saldo, sem lançamento, sem WalletBalanceChanged
+  [pass] referência ausente: PENDING_REFERENCE (202) com saldo atual e evento PendingReference
+  [pass] REFUND de BET processada credita; segundo REFUND/ROLLBACK da mesma BET: ALREADY_REVERSED (D1)
+  [pass] wallet inexistente: WalletNotFoundError (404), nenhuma linha gravada (D7)
+  [pass] payload inválido de domínio (REFUND sem referência, BET 0): InvalidPayloadError (400)
+  [pass] moeda diferente da wallet: REJECTED CURRENCY_MISMATCH
+  [pass] redelivery da mesma mensagem: inbox absorve, replay sem duplicar efeito
+  [pass] mesmo messageId com payload diferente: InboxConflictError
+  [pass] mesma operação com messageIds diferentes (Restrição #3): banco garante 1 efeito
+  [pass] 100.00 + 2×BET 80.00 simultâneas: 1 PROCESSED, 1 REJECTED, saldo 20.00, 1 débito
+  [pass] mesma aposta 50× em paralelo: 1 débito, 49 replays
+  [pass] mesma key em paralelo com walletIds diferentes (locks diferentes): 1 grava, o outro 409
+  [pass] hot wallet: 30 BETs distintas de 5.00 sobre 100.00 → 20 PROCESSED, 10 REJECTED, saldo 0.00
+  [pass] erro inesperado no banco: rollback do efeito e FAILED INTERNAL_PERMANENT_ERROR auditável
+
+## test/integration/reconciliation.test.ts
+  [pass] consistente depois de operações (contrato do enunciado)
+  [pass] divergência forçada: consistent=false, métrica incrementada e NADA é corrigido
+  [pass] wallet inexistente: 404; id inválido: 400
+
+## test/integration/outbox.test.ts
+  [pass] evento só existe se a transação comitar (atomicidade efeito + outbox)
+  [pass] nada é publicado antes do worker rodar (Restrição #4); o worker publica e marca
+  [pass] dois publishers concorrentes (instâncias distintas) sobre a mesma outbox: cada evento 1×
+  [pass] crash entre publicar e marcar: republica com o mesmo eventId; FIFO deduplica
+  [pass] SQS indisponível: nada é perdido; attempts++ e backoff; publica quando volta
+
+## test/integration/pending-reference.test.ts
+  [pass] ROLLBACK antes da BET: 202, e processado imediatamente quando a BET chega
+  [pass] cadeia: ROLLBACK(REFUND) e REFUND(BET) antes da BET → tudo resolvido em cascata
+  [pass] referência chega REJECTED: dependente vira REFERENCE_NOT_PROCESSED (D2)
+  [pass] sem gatilho imediato, o worker resolve a pendência quando a referência existe
+  [pass] referência ainda ausente: reagenda com backoff e incrementa attempts
+  [pass] TTL esgotado: REJECTED REFERENCE_NOT_FOUND + evento WagerTransactionRejected
+  [pass] limite de tentativas esgotado: REJECTED REFERENCE_NOT_FOUND
+  [pass] duas instâncias (ORMs distintos) disputando o mesmo lote: cada pendência resolvida 1×
+
+## test/integration/health-live.test.ts
+  [pass] GET /health/live responde 200 sem consultar dependências
+  [pass] GET /health/ready verifica PostgreSQL e SQS
+  [pass] GET /health/ready responde 503 quando o SQS está inalcançável
+  [pass] GET /metrics expõe métricas Prometheus
+
+## test/integration/atomicity.test.ts
+  [pass] falha ao gravar o evento desfaz débito, lançamento e inbox; sobra só o FAILED auditável
+  [pass] operação vizinha na mesma wallet não é afetada
+
+## test/concurrency/crash-recovery.test.ts
+  [pass] 5. worker morto DEPOIS do commit e ANTES do ack: redelivery não duplica o efeito
+  [pass] 8. reinício: kill -9 no meio do processamento; nova instância conclui; consistência final comprovada
+  [pass] SIGTERM: shutdown gracioso conclui a mensagem em andamento; nada é perdido
+
+## test/concurrency/multi-instance.test.ts
+  [pass] 1. mesma aposta 50× em paralelo, espalhada nas 3 instâncias: 1 débito, 49 replays
+  [pass] 2. 100.00 + 2×BET 80.00 simultâneas em instâncias diferentes: 1×201, 1×422, saldo 20.00, 1 débito
+  [pass] 3. wallets distintas em paralelo: sem interferência e sem bloqueio cruzado
+  [pass] 4. 3 instâncias consumindo a fila + HTTP simultâneo: cada operação aplicada 1×
+  [pass] 7. ROLLBACK na instância A antes da BET na instância B: 202 e depois PROCESSED
+  [pass] 6. publishers concorrentes (3 instâncias) sobre a mesma outbox: todos publicados, nenhum perdido ou duplicado

@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+.DS_Store
+.snapshot-*.json
+# O projeto usa Bun (bun.lock); um lockfile do npm geraria resolução divergente.
+package-lock.json

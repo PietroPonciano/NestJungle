@@ -1,0 +1,22 @@
+# Fluxo ponta a ponta no compose recém-criado (HTTP + SQS + outbox)
+POST /wallets -> {"id":"01a1ebd3-d27e-7107-bd08-6b7c298202f7","playerId":"c34f5fe0-26ce-48bb-82e6-bb82c2ca0df2","balance":{"amount":"100.00","currency":"BRL"},"version":1}
+== 2×BET 80.00 simultâneas (cenário obrigatório) ==
+{"transactionId":"01a1ebd3-d2bf-7652-8af8-40a8b5491cfb","status":"PROCESSED","balance":{"amount":"20.00","currency":"BRL"},"idempotentReplay":false} [201]
+{"transactionId":"01a1ebd3-d2c0-700d-a698-1ea77acb9b5a","status":"REJECTED","balance":{"amount":"20.00","currency":"BRL"},"failureCode":"INSUFFICIENT_FUNDS","idempotentReplay":false} [422]
+== replay da BET a ==
+{"transactionId":"01a1ebd3-d2c0-700d-a698-1ea77acb9b5a","status":"REJECTED","balance":{"amount":"20.00","currency":"BRL"},"failureCode":"INSUFFICIENT_FUNDS","idempotentReplay":true} [422]
+== mesma key, payload diferente ==
+{"error":"IDEMPOTENCY_CONFLICT","message":"Idempotency-Key já usada com payload diferente"} [409]
+== via SQS: mesma operação 'a' com outro messageId (Restrição #3) ==
+5775e503-3265-466d-ac02-a707b8f426cf
+== estado no banco: ver 02b-estado-banco.txt ==
+== reconciliação ==
+{"walletId":"01a1ebd3-d27e-7107-bd08-6b7c298202f7","storedBalance":{"amount":"20.00","currency":"BRL"},"calculatedBalance":{"amount":"20.00","currency":"BRL"},"difference":{"amount":"0.00","currency":"BRL"},"consistent":true,"checkedEntries":2}
+== eventos em wager-events.fifo ==
+  WagerTransactionProcessed correlationId=audit-1
+  WalletBalanceChanged correlationId=audit-1
+  WagerTransactionProcessed correlationId=01a1ebd3-d2be-75d8-b803-417746bc477c
+  WalletBalanceChanged correlationId=01a1ebd3-d2be-75d8-b803-417746bc477c
+  WagerTransactionRejected correlationId=01a1ebd3-d2c0-700c-81a9-01b3d51bbee2
+== log da app (consumidor) ==
+{"ts":"2026-11-17T23:24:52.546Z","level":"info","msg":"mensagem processada","component":"sqs-consumer","messageId":"audit-m1","receiveCount":1,"transactionId":"01a1ebd3-d2c0-700d-a698-1ea77acb9b5a","walletId":"01a1ebd3-d27e-7107-bd08-6b7c298202f7","providerId":"provider-a","status":"REJECTED","failureCode":"INSUFFICIENT_FUNDS","

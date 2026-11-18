@@ -1,0 +1,88 @@
+# Ambiente local completo: PostgreSQL + LocalStack (3 filas SQS) + aplicação.
+# `migrate` aplica as migrations (up) e termina; a app só sobe depois que ele
+# conclui com sucesso.
+name: wagering
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: wagering
+      POSTGRES_USER: wagering
+      POSTGRES_PASSWORD: wagering
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U wagering -d wagering']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    # Versão fixada: tags recentes de localstack/localstack podem exigir token.
+    image: localstack/localstack:4.9
+    environment:
+      SERVICES: sqs
+      # URLs no formato legado (http://host:4566/<conta>/<fila>), as mesmas do .env
+      SQS_ENDPOINT_STRATEGY: 'off'
+      AWS_DEFAULT_REGION: us-east-1
+      SQS_MAX_RECEIVE_COUNT: 5
+      SQS_VISIBILITY_TIMEOUT_SECONDS: 60
+    ports:
+      - '4566:4566'
+    volumes:
+      - ./docker/localstack/init:/etc/localstack/init/ready.d:ro
+    healthcheck:
+      # "ready" só depois que os scripts de init.d/ready.d terminaram, ou seja,
+      # as filas já existem quando a app sobe.
+      test:
+        [
+          'CMD-SHELL',
+          'curl -sf http://localhost:4566/_localstack/init/ready | grep -q ''"completed": true''',
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  migrate:
+    build: .
+    command: ['bun', 'dist/cli/migrate.js', 'up']
+    environment: &db-env
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: wagering
+      DATABASE_USER: wagering
+      DATABASE_PASSWORD: wagering
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  app:
+    build: .
+    # init: processo init leve como PID 1 (encaminha SIGTERM ao Bun).
+    # Grace period > long poll do SQS (20 s): o consumidor termina a mensagem
+    # em andamento e devolve as não iniciadas antes de sair.
+    init: true
+    stop_grace_period: 30s
+    environment:
+      <<: *db-env
+      PORT: 3000
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      SQS_ENDPOINT: http://localstack:4566
+      SQS_TRANSACTIONS_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+      SQS_TRANSACTIONS_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
+      SQS_EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wager-events.fifo
+    ports:
+      - '3000:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+
+volumes:
+  pgdata:

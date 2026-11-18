@@ -1,0 +1,4 @@
+[test]
+# Testes de integração e concorrência usam PostgreSQL e LocalStack reais
+# (long polling, backoff, processos filhos): o timeout padrão de 5 s é pouco.
+preload = ["./test/setup.ts"]
