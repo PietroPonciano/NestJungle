@@ -60,7 +60,7 @@ async function waitFor(check: () => Promise<boolean>, timeoutMs = 10_000): Promi
 /** Torna todas as pendências vencidas agora (sem esperar o backoff real). */
 const makeDue = () =>
   c.query(
-    "UPDATE wager_transactions SET next_attempt_at = now() - interval '1 second' WHERE status = 'PENDING_REFERENCE'",
+    "UPDATE wager_transactions SET next_attempt_at = now() - interval '1 minute' WHERE status = 'PENDING_REFERENCE'",
   );
 
 describe('Referência fora de ordem', () => {

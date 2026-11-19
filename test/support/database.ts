@@ -22,22 +22,33 @@ export const TEST_QUEUES = {
   dlq: 'wager-transactions-dlq-test.fifo',
   events: 'wager-events-test.fifo',
 } as const;
+/** Defaults que o ambiente pode sobrescrever (ex.: endpoint do LocalStack no CI). */
 const TEST_DEFAULTS = {
   SQS_ENDPOINT: 'http://localhost:4566',
+};
+
+/**
+ * Isolamento OBRIGATÓRIO: vence o `process.env`. O Bun carrega o `.env` da raiz
+ * automaticamente; se as URLs de fila dele (as reais) vencessem, a suíte
+ * disputaria mensagens com a app do compose — que as mandaria à DLQ como
+ * WALLET_NOT_FOUND, porque as wallets só existem em `wagering_test`.
+ */
+const TEST_ISOLATION = {
+  DATABASE_NAME: TEST_DB,
   SQS_TRANSACTIONS_QUEUE_URL: `${QUEUE_BASE}/${TEST_QUEUES.transactions}`,
   SQS_TRANSACTIONS_DLQ_URL: `${QUEUE_BASE}/${TEST_QUEUES.dlq}`,
   SQS_EVENTS_QUEUE_URL: `${QUEUE_BASE}/${TEST_QUEUES.events}`,
 };
 
 export function testConfig(overrides: Record<string, string> = {}): AppConfig {
-  return loadConfig({ ...TEST_DEFAULTS, ...process.env, DATABASE_NAME: TEST_DB, ...overrides });
+  return loadConfig({ ...TEST_DEFAULTS, ...process.env, ...TEST_ISOLATION, ...overrides });
 }
 
 /** Variáveis de ambiente equivalentes, para processos filhos (Bun.spawn). */
 export function testEnv(overrides: Record<string, string> = {}): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
-  return { ...TEST_DEFAULTS, ...env, DATABASE_NAME: TEST_DB, ...overrides };
+  return { ...TEST_DEFAULTS, ...env, ...TEST_ISOLATION, ...overrides };
 }
 
 export async function pgClient(database: string = TEST_DB): Promise<Client> {

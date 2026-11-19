@@ -12,8 +12,9 @@
  *  - Classificação:
  *      negócio (REJECTED) e replay          -> ack
  *      transitório                          -> sem ack; retry com backoff;
- *                                              na última tentativa grava FAILED
- *                                              RETRY_LIMIT_EXCEEDED (E4) e manda à DLQ
+ *                                              na última tentativa, DLQ explícita
+ *                                              com motivo RETRY_LIMIT_EXCEEDED (E4),
+ *                                              SEM gravar nada (D7: a key fica livre)
  *                                              (limite = maxReceiveCount da
  *                                              RedrivePolicy da fila)
  *      payload inválido / wallet inexistente
@@ -21,7 +22,8 @@
  *      FAILED (erro permanente gravado)     -> DLQ explícita + ack
  *  - Mensagens processadas em sequência dentro do lote: o FIFO entrega em
  *    ordem por MessageGroupId (= walletId). Várias instâncias dividem os
- *    grupos entre si.
+ *    grupos entre si. Se uma mensagem vai a retry, as seguintes do MESMO grupo
+ *    no lote são devolvidas sem processar (a ordem por wallet se mantém).
  *  - SIGTERM (stop): para de buscar, conclui a mensagem em andamento (commit +
  *    ack) e devolve a visibilidade (timeout 0) das que ainda não começaram.
  */
@@ -43,12 +45,9 @@ import {
   WalletNotFoundError,
 } from '../../application/errors';
 import type { SubmitWagerTransactionUseCase } from '../../application/use-cases/submit-wager-transaction';
+import { FailureCode } from '../../domain/wager-transaction/failure-code';
 import { WagerTransactionStatus } from '../../domain/wager-transaction/wager-transaction-kind';
-import {
-  type ParsedWagerMessage,
-  parseWagerMessage,
-  peekMessageId,
-} from '../../interfaces/messaging/wager-message';
+import { parseWagerMessage, peekMessageId } from '../../interfaces/messaging/wager-message';
 import type { AppLogger } from '../../shared/logger';
 import type { AppConfig } from '../config/app-config';
 import { parseRedriveMaxReceiveCount } from './redrive-policy';
@@ -65,7 +64,7 @@ const NOOP_OBSERVER: ConsumerObserver = {
   onProcessingTime: () => undefined,
 };
 
-type Disposition =
+export type Disposition =
   | { type: 'ack' }
   | { type: 'retry'; delaySeconds: number }
   | { type: 'dead-letter'; reason: string };
@@ -99,8 +98,8 @@ export class SqsWagerConsumer {
   /**
    * Alinha o limite de tentativas com a RedrivePolicy da fila (fonte da verdade
    * do enunciado §10). Sem isso, SQS_MAX_RECEIVE_COUNT pode divergir da fila:
-   * menor, um erro transitório viraria FAILED RETRY_LIMIT_EXCEEDED (terminal)
-   * enquanto a fila ainda tentaria de novo; maior, a decisão E4 nunca rodaria.
+   * menor, um erro transitório iria à DLQ enquanto a fila ainda tentaria de
+   * novo; maior, a DLQ explícita com motivo (E4) nunca rodaria.
    * Se a fila não puder ser consultada, mantém o valor atual e o laço tenta de
    * novo na próxima volta.
    */
@@ -181,6 +180,11 @@ export class SqsWagerConsumer {
         continue;
       }
 
+      // Grupos FIFO com uma mensagem em retry neste lote: as seguintes do mesmo
+      // grupo NÃO são processadas antes dela (preserva a ordem por wallet).
+      // Ficam invisíveis um pouco além do backoff da mensagem em retry, para que
+      // ela reapareça primeiro mesmo onde o FIFO não retém o grupo (LocalStack).
+      const blockedGroups = new Map<string, number>();
       for (const [index, message] of messages.entries()) {
         // Método (e não o campo) porque stop() pode ter mudado o estado durante o await.
         if (!this.isRunning()) {
@@ -188,24 +192,31 @@ export class SqsWagerConsumer {
           await this.releaseAll(messages.slice(index));
           break;
         }
-        await this.handle(message);
+        const group = message.Attributes?.MessageGroupId;
+        const blockedFor = group === undefined ? undefined : blockedGroups.get(group);
+        if (blockedFor !== undefined) {
+          await this.releaseAll([message], blockedFor + 1);
+          continue;
+        }
+        const outcome = await this.handle(message);
+        if (outcome.type === 'retry' && group !== undefined) {
+          blockedGroups.set(group, outcome.delaySeconds);
+        }
       }
     }
   }
 
-  /** Processa uma mensagem. Público para os testes de integração. */
-  async handle(message: Message): Promise<void> {
+  /** Processa uma mensagem e devolve o destino dado a ela. Público para os testes. */
+  async handle(message: Message): Promise<Disposition> {
     const started = performance.now();
     const receiveCount = Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? '1', 10);
     // No SQS o messageId é também o correlationId (propagado para os eventos).
     const messageId = peekMessageId(message.Body);
     const sqsLog = this.logger.child({ correlationId: messageId, messageId, receiveCount });
-    let parsed: ParsedWagerMessage | undefined;
     let disposition: Disposition;
 
     try {
-      parsed = parseWagerMessage(message.Body);
-      const { command, messageId, payloadHash } = parsed;
+      const { command, messageId, payloadHash } = parseWagerMessage(message.Body);
       const outcome = await this.submit.execute(
         command,
         { correlationId: messageId, causationId: messageId },
@@ -225,28 +236,25 @@ export class SqsWagerConsumer {
           ? { type: 'dead-letter', reason: outcome.result.failureCode ?? 'FAILED' }
           : { type: 'ack' };
     } catch (error: unknown) {
-      disposition = await this.classify(error, parsed, receiveCount, sqsLog);
+      disposition = this.classify(error, receiveCount, sqsLog);
     }
 
     await this.apply(message, disposition, sqsLog);
     this.observer.onProcessingTime((performance.now() - started) / 1000);
+    return disposition;
   }
 
-  private async classify(
-    error: unknown,
-    parsed: ParsedWagerMessage | undefined,
-    receiveCount: number,
-    log: AppLogger,
-  ): Promise<Disposition> {
+  private classify(error: unknown, receiveCount: number, log: AppLogger): Disposition {
     if (error instanceof TransientInfrastructureError) {
-      if (receiveCount >= this.maxReceiveCount && parsed !== undefined) {
-        // E4: última tentativa permitida. Se o banco aceitar, registra FAILED auditável.
-        const recorded = await this.submit.recordRetryLimitExceeded(parsed.command, {
-          consumerName: this.config.consumerName,
-          messageId: parsed.messageId,
-          payloadHash: parsed.payloadHash,
+      if (receiveCount >= this.maxReceiveCount) {
+        // E4: última tentativa permitida. Vai à DLQ com o motivo, mas NADA é
+        // gravado (D7): a condição é transitória, então a idempotency key fica
+        // livre. Um redrive da DLQ ou um retry do provedor (HTTP/fila) com a
+        // mesma key processa normalmente quando a infraestrutura voltar.
+        log.error('tentativas esgotadas por erro transitório; enviando à DLQ', {
+          error: error.message,
         });
-        if (recorded !== undefined) return { type: 'dead-letter', reason: 'RETRY_LIMIT_EXCEEDED' };
+        return { type: 'dead-letter', reason: FailureCode.RetryLimitExceeded };
       }
       log.warn('erro transitório; mensagem volta para a fila', { error: error.message });
       return { type: 'retry', delaySeconds: this.backoffSeconds(receiveCount) };
@@ -329,7 +337,7 @@ export class SqsWagerConsumer {
     );
   }
 
-  private async releaseAll(messages: Message[]): Promise<void> {
+  private async releaseAll(messages: Message[], visibilityTimeout = 0): Promise<void> {
     await Promise.all(
       messages.map((m) =>
         this.sqs
@@ -337,7 +345,7 @@ export class SqsWagerConsumer {
             new ChangeMessageVisibilityCommand({
               QueueUrl: this.config.transactionsQueueUrl,
               ReceiptHandle: m.ReceiptHandle,
-              VisibilityTimeout: 0,
+              VisibilityTimeout: visibilityTimeout,
             }),
           )
           .catch(() => undefined),

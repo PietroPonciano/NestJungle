@@ -11,6 +11,7 @@
 import { Migrator } from '@mikro-orm/migrations';
 import { MikroORM, defineConfig, type Options } from '@mikro-orm/postgresql';
 import { Migration20261117000001InitialSchema } from '../../../migrations/Migration20261117000001InitialSchema';
+import { Migration20261119000002AppRoleAndTerminalGuard } from '../../../migrations/Migration20261119000002AppRoleAndTerminalGuard';
 import type { AppConfig } from '../config/app-config';
 import { ALL_SCHEMAS } from './records';
 
@@ -36,6 +37,10 @@ export function buildOrmOptions(db: AppConfig['database']): Options {
         {
           name: 'Migration20261117000001InitialSchema',
           class: Migration20261117000001InitialSchema,
+        },
+        {
+          name: 'Migration20261119000002AppRoleAndTerminalGuard',
+          class: Migration20261119000002AppRoleAndTerminalGuard,
         },
       ],
     },

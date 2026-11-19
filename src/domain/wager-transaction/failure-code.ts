@@ -114,7 +114,8 @@ export const FAILURE_CODES: Readonly<Record<FailureCode, FailureCodeSpec>> = {
   [FailureCode.RetryLimitExceeded]: {
     category: FailureCategory.Permanent,
     providerAction: ProviderAction.RetryLater,
-    description: 'Tentativas da fila esgotadas por erro transitório persistente',
+    description:
+      'Tentativas da fila esgotadas por erro transitório persistente. Só motivo de DLQ (atributo failureReason): nunca é gravado, então a mesma operação pode ser reenviada',
   },
 };
 

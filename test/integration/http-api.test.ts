@@ -223,6 +223,36 @@ describe('POST /wagering/transactions — tabela de status §7.3', () => {
       'Idempotency-Key': 'outra',
     });
     expect(otherKey.status).toBe(409);
+
+    // Mesma key reaproveitada com uma wallet inexistente: conflito, não 404.
+    const ghostWallet = await call(
+      'POST',
+      '/wagering/transactions',
+      { ...req.body, walletId: Bun.randomUUIDv7() },
+      req.headers,
+    );
+    expect(ghostWallet.status).toBe(409);
+    expect(ghostWallet.body.error).toBe('IDEMPOTENCY_CONFLICT');
+  });
+
+  test('400 idempotencyKey do corpo diferente do header; igual ao header é aceita', async () => {
+    const w = await newWallet();
+    const req = wager(w);
+    const mismatch = await call(
+      'POST',
+      '/wagering/transactions',
+      { ...req.body, idempotencyKey: 'outra-chave' },
+      req.headers,
+    );
+    expect(mismatch.status).toBe(400);
+    expect(mismatch.body.error).toBe('INVALID_PAYLOAD');
+    const same = await call(
+      'POST',
+      '/wagering/transactions',
+      { ...req.body, idempotencyKey: req.headers['Idempotency-Key'] },
+      req.headers,
+    );
+    expect(same.status).toBe(201);
   });
 
   test('404 wallet inexistente', async () => {

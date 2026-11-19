@@ -34,6 +34,7 @@ import { settle } from '../../domain/wager-transaction/wager-settlement';
 import {
   ApplicationError,
   ConcurrentInsertConflictError,
+  IdempotencyConflictError,
   InboxConflictError,
   InvalidPayloadError,
   WalletNotFoundError,
@@ -113,23 +114,6 @@ export class SubmitWagerTransactionUseCase {
     }
   }
 
-  /**
-   * Decisão E4: tentativas da fila esgotadas por erro transitório persistente.
-   * Grava FAILED RETRY_LIMIT_EXCEEDED se o banco permitir; devolve undefined
-   * quando nem isso foi possível (a redrive do SQS leva a mensagem à DLQ).
-   */
-  async recordRetryLimitExceeded(
-    command: SubmitWagerCommand,
-    inbox: InboxContext,
-  ): Promise<SubmitOutcome | undefined> {
-    const exhausted = new Error('limite de tentativas da fila esgotado');
-    try {
-      return await this.recordFailure(command, inbox, exhausted, FailureCode.RetryLimitExceeded);
-    } catch {
-      return undefined;
-    }
-  }
-
   private buildCandidate(command: SubmitWagerCommand, at: Date): WagerTransaction {
     if (!SUBMITTABLE_KINDS.includes(command.kind)) {
       throw new InvalidPayloadError(`kind ${command.kind} não pode ser submetido`);
@@ -154,7 +138,21 @@ export class SubmitWagerTransactionUseCase {
     // idempotência. Duas cópias da mesma operação na mesma wallet ficam
     // serializadas aqui; a segunda só lê depois do commit da primeira e vira replay.
     const wallet = await scope.wallets.lockById(candidate.walletId);
-    if (wallet === undefined) throw new WalletNotFoundError(candidate.walletId);
+    if (wallet === undefined) {
+      // A key/externalId pode já existir com OUTRA wallet: isso é conflito de
+      // idempotência (409), não "wallet inexistente" (404).
+      const existing = await scope.transactions.findByIdentity(
+        candidate.providerId,
+        candidate.idempotencyKey,
+        candidate.externalTransactionId,
+      );
+      if (existing.length > 0) {
+        throw new IdempotencyConflictError(
+          'Idempotency-Key/externalTransactionId já registrados com outra wallet',
+        );
+      }
+      throw new WalletNotFoundError(candidate.walletId);
+    }
     const balanceBefore = wallet.balance;
 
     // 2. Inbox (só SQS): gravada já como processada, no mesmo commit do efeito.

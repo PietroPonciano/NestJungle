@@ -110,6 +110,16 @@ export function parseWagerFields(
   return { ...command, money: command.money, idempotencyKey };
 }
 
+/** HTTP: `idempotencyKey` opcional no corpo deve coincidir com o header. */
+export function assertBodyKeyMatches(body: unknown, headerKey: string): void {
+  if (!isObject(body) || body.idempotencyKey === undefined) return;
+  if (body.idempotencyKey !== headerKey) {
+    throw new InvalidPayloadError('idempotencyKey do corpo difere do header Idempotency-Key', [
+      'idempotencyKey: deve ser igual ao header Idempotency-Key (ou omitida)',
+    ]);
+  }
+}
+
 export function parseIdempotencyKey(value: unknown, field = 'Idempotency-Key'): string {
   if (typeof value !== 'string' || value.trim() === '' || value.length > MAX_TEXT) {
     throw new InvalidPayloadError(`${field} obrigatório`, [

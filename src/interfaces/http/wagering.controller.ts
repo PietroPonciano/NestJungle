@@ -19,7 +19,11 @@ import type { WagerResult } from '../../application/use-cases/wager-result';
 import type { AppLogger } from '../../shared/logger';
 import type { AppMetrics } from '../../shared/metrics';
 import { TOKENS } from '../../shared/tokens';
-import { parseIdempotencyKey, parseWagerFields } from '../shared/payload-parsers';
+import {
+  assertBodyKeyMatches,
+  parseIdempotencyKey,
+  parseWagerFields,
+} from '../shared/payload-parsers';
 import { AuthGuard } from './auth.guard';
 import { parseUuidParam } from './http-parsers';
 
@@ -46,7 +50,11 @@ export class WageringController {
   ): Promise<WagerResult> {
     const started = performance.now();
     // O header Idempotency-Key é obrigatório e é a fonte da verdade (enunciado §9).
-    const command = parseWagerFields(body, parseIdempotencyKey(idempotencyKey), 'Corpo');
+    // Se o corpo também trouxer idempotencyKey, ela precisa ser igual: duas
+    // chaves divergentes indicam erro do cliente, não uma escolha silenciosa.
+    const key = parseIdempotencyKey(idempotencyKey);
+    assertBodyKeyMatches(body, key);
+    const command = parseWagerFields(body, key, 'Corpo');
     const { result } = await this.submit.execute(command, { correlationId });
     this.metrics.processingDuration.observe(
       { source: 'http' },

@@ -3,6 +3,16 @@
 # conclui com sucesso.
 name: wagering
 
+# Conexão com o PostgreSQL compartilhada por migrate e app. DATABASE_USER aqui
+# é o usuário de migração (dono do schema); a app sobrescreve com o login de
+# runtime de privilégio mínimo.
+x-db-env: &db-env
+  DATABASE_HOST: postgres
+  DATABASE_PORT: 5432
+  DATABASE_NAME: wagering
+  DATABASE_USER: wagering
+  DATABASE_PASSWORD: wagering
+
 services:
   postgres:
     image: postgres:17
@@ -49,12 +59,12 @@ services:
   migrate:
     build: .
     command: ['bun', 'dist/cli/migrate.js', 'up']
-    environment: &db-env
-      DATABASE_HOST: postgres
-      DATABASE_PORT: 5432
-      DATABASE_NAME: wagering
-      DATABASE_USER: wagering
-      DATABASE_PASSWORD: wagering
+    environment:
+      <<: *db-env
+      # Login de runtime com privilégio mínimo (membro de wagering_app, sem ser
+      # dono das tabelas): o migrate cria/atualiza; a app conecta com ele.
+      DATABASE_APP_USER: wagering_service
+      DATABASE_APP_PASSWORD: wagering_service
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +78,9 @@ services:
     stop_grace_period: 30s
     environment:
       <<: *db-env
+      # Não é o dono do schema: não desliga triggers nem altera o ledger.
+      DATABASE_USER: wagering_service
+      DATABASE_PASSWORD: wagering_service
       PORT: 3000
       AWS_REGION: us-east-1
       AWS_ACCESS_KEY_ID: test

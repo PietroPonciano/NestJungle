@@ -181,7 +181,11 @@ describe('Outbox', () => {
     expect(await pendingCount()).toBe(2);
 
     // Outra instância assume (zera o backoff para não esperar no teste).
-    await c.query('UPDATE outbox_messages SET next_attempt_at = now() WHERE published_at IS NULL');
+    // Bem no passado: o publisher compara com o relógio do host, não com o now()
+    // do container; um desvio de milissegundos entre os dois tornava o teste instável.
+    await c.query(
+      "UPDATE outbox_messages SET next_attempt_at = now() - interval '1 minute' WHERE published_at IS NULL",
+    );
     const recovered = await publisher().execute();
     expect(recovered.published).toBe(2);
     expect(await pendingCount()).toBe(0);
@@ -213,7 +217,11 @@ describe('Outbox', () => {
     expect(rows.rows[0]?.last_error).not.toBeNull();
     expect(Number.parseInt(rows.rows[0]?.delay ?? '-1', 10)).toBeGreaterThanOrEqual(0);
 
-    await c.query('UPDATE outbox_messages SET next_attempt_at = now() WHERE published_at IS NULL');
+    // Bem no passado: o publisher compara com o relógio do host, não com o now()
+    // do container; um desvio de milissegundos entre os dois tornava o teste instável.
+    await c.query(
+      "UPDATE outbox_messages SET next_attempt_at = now() - interval '1 minute' WHERE published_at IS NULL",
+    );
     expect((await publisher().execute()).published).toBe(2);
     expect(await pendingCount()).toBe(0);
   });

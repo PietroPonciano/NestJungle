@@ -13,18 +13,34 @@ const TRANSIENT_SQLSTATES = new Set([
   '57P01', // admin_shutdown
   '57P02', // crash_shutdown
   '57P03', // cannot_connect_now
-  '53300', // too_many_connections
-  '53400', // configuration_limit_exceeded
+  '25006', // read_only_sql_transaction (failover: conectado a uma réplica)
+  '58030', // io_error
 ]);
+
+/**
+ * Classes inteiras transitórias:
+ *  08 = connection_exception;
+ *  53 = insufficient_resources (disk_full, out_of_memory, too_many_connections...).
+ * Recursos esgotados se resolvem sem mudar a requisição; persistir FAILED aqui
+ * queimaria a idempotency key por um problema de infraestrutura.
+ */
+const TRANSIENT_SQLSTATE_CLASSES = ['08', '53'];
 
 const TRANSIENT_NODE_CODES = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
+  'ECONNABORTED',
   'ETIMEDOUT',
   'EPIPE',
   'ENOTFOUND',
   'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
 ]);
+
+// Mensagens do `pg`/pool sem SQLSTATE nem código de rede.
+const TRANSIENT_MESSAGE =
+  /Connection terminated|connect ECONNREFUSED|timeout exceeded when trying to connect|Client has encountered a connection error|Connection ended unexpectedly|Client was closed and is not queryable/i;
 
 interface ErrorLike {
   code?: unknown;
@@ -64,21 +80,16 @@ export function constraintOf(error: unknown): string | undefined {
 export function isTransientDbError(error: unknown): boolean {
   const state = sqlStateOf(error);
   if (state !== undefined) {
-    // Classe 08 = connection_exception.
-    return TRANSIENT_SQLSTATES.has(state) || state.startsWith('08');
+    return (
+      TRANSIENT_SQLSTATES.has(state) ||
+      TRANSIENT_SQLSTATE_CLASSES.some((cls) => state.startsWith(cls))
+    );
   }
   const e = asErrorLike(error);
   if (e === undefined) return false;
   if (typeof e.code === 'string' && TRANSIENT_NODE_CODES.has(e.code)) return true;
   if (e.name === 'ConnectionException') return true;
-  if (
-    typeof e.message === 'string' &&
-    /Connection terminated|connect ECONNREFUSED|timeout exceeded when trying to connect/i.test(
-      e.message,
-    )
-  ) {
-    return true;
-  }
+  if (typeof e.message === 'string' && TRANSIENT_MESSAGE.test(e.message)) return true;
   return e.cause !== undefined ? isTransientDbError(e.cause) : false;
 }
 

@@ -3,7 +3,9 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import {
+  ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
+  type Message,
   ReceiveMessageCommand,
   SendMessageCommand,
   type SQSClient,
@@ -12,7 +14,10 @@ import type { MikroORM } from '@mikro-orm/postgresql';
 import type { Client } from 'pg';
 import { SubmitWagerTransactionUseCase } from '../../src/application/use-cases/submit-wager-transaction';
 import type { AppConfig } from '../../src/infrastructure/config/app-config';
-import { SqsWagerConsumer } from '../../src/infrastructure/messaging/sqs-wager-consumer';
+import {
+  type Disposition,
+  SqsWagerConsumer,
+} from '../../src/infrastructure/messaging/sqs-wager-consumer';
 import { MikroOrmUnitOfWork } from '../../src/infrastructure/persistence/mikro-orm-unit-of-work';
 import { parseWagerMessage } from '../../src/interfaces/messaging/wager-message';
 import { JsonLogger } from '../../src/shared/logger';
@@ -289,7 +294,7 @@ describe('Consumidor SQS', () => {
     expect(await balance(w.id)).toBe('95.00');
   });
 
-  test('última tentativa com erro transitório: FAILED RETRY_LIMIT_EXCEEDED auditável + DLQ (E4)', async () => {
+  test('última tentativa com erro transitório: DLQ com motivo, nada gravado; redrive processa (E4/D7)', async () => {
     const w = await wallet('100.00');
     const bet = body(w);
     await send(bet, w.id);
@@ -298,8 +303,11 @@ describe('Consumidor SQS', () => {
     await consumer.stop();
 
     // A referência (BET) fica travada por outra conexão: o REFUND não consegue
-    // o lock da referência (transitório), mas o registro do FAILED só precisa
-    // da wallet.
+    // o lock da referência (transitório).
+    const refund = body(w, {
+      kind: 'REFUND',
+      referenceExternalTransactionId: bet.data.externalTransactionId,
+    });
     const holder = await pgClient();
     await holder.query('BEGIN');
     await holder.query(
@@ -307,10 +315,7 @@ describe('Consumidor SQS', () => {
       [bet.data.externalTransactionId],
     );
     try {
-      await send(
-        body(w, { kind: 'REFUND', referenceExternalTransactionId: bet.data.externalTransactionId }),
-        w.id,
-      );
+      await send(refund, w.id);
       const received = await sqs.send(
         new ReceiveMessageCommand({
           QueueUrl: cfg.transactionsQueueUrl,
@@ -331,10 +336,25 @@ describe('Consumidor SQS', () => {
       await holder.end();
     }
     expect(dlqReasons).toEqual(['RETRY_LIMIT_EXCEEDED']);
-    expect(await txCount(w.id, "status = 'FAILED' AND failure_code = 'RETRY_LIMIT_EXCEEDED'")).toBe(
-      1,
-    );
+    // D7: transitório nunca vira status — nenhuma linha do REFUND, nem inbox.
+    expect(await txCount(w.id, "kind = 'REFUND'")).toBe(0);
+    const inbox = await c.query('SELECT 1 FROM inbox_messages WHERE message_id = $1', [
+      refund.messageId,
+    ]);
+    expect(inbox.rowCount).toBe(0);
     expect(await balance(w.id)).toBe('90.00');
+
+    // A key não foi queimada: o redrive da DLQ (mesma mensagem) processa normalmente.
+    const dead = await drain(sqs, cfg.transactionsDlqUrl);
+    expect(dead).toHaveLength(1);
+    expect(dead[0]?.MessageAttributes?.failureReason?.StringValue).toBe('RETRY_LIMIT_EXCEEDED');
+    await send(JSON.parse(dead[0]?.Body ?? '{}'), w.id);
+    consumer.start();
+    await waitFor(
+      async () => (await txCount(w.id, "kind = 'REFUND' AND status = 'PROCESSED'")) === 1,
+    );
+    await consumer.stop();
+    expect(await balance(w.id)).toBe('100.00');
   });
 
   test('limite de tentativas vem da RedrivePolicy da fila, não de um SQS_MAX_RECEIVE_COUNT divergente', async () => {
@@ -394,7 +414,7 @@ describe('Consumidor SQS', () => {
         );
       }
     }
-    // Com o limite da config (2) isto viraria FAILED terminal; com o da fila (5), é retry.
+    // Com o limite da config (2) isto iria à DLQ; com o da fila (5), é retry.
     expect(reasons).toEqual([]);
     expect(retried).toBe(1);
     expect(await txCount(w.id, "status = 'FAILED'")).toBe(0);
@@ -414,5 +434,61 @@ describe('Consumidor SQS', () => {
     );
     await unreachable.syncRedrivePolicy();
     expect(unreachable.effectiveMaxReceiveCount).toBe(3);
+  });
+
+  test('retry de uma mensagem não deixa as seguintes do MESMO grupo passarem na frente', async () => {
+    // Só a ordem de entrega importa aqui: o handle é substituído e não toca o banco.
+    const seen: string[] = [];
+    let firstAttempt = true;
+    class Recording extends SqsWagerConsumer {
+      override async handle(message: Message): Promise<Disposition> {
+        const id = message.Body ?? '';
+        seen.push(id);
+        if (id === 'g1-m1' && firstAttempt) {
+          firstAttempt = false;
+          await sqs.send(
+            new ChangeMessageVisibilityCommand({
+              QueueUrl: cfg.transactionsQueueUrl,
+              ReceiptHandle: message.ReceiptHandle,
+              VisibilityTimeout: 1,
+            }),
+          );
+          return { type: 'retry', delaySeconds: 1 };
+        }
+        await sqs.send(
+          new DeleteMessageCommand({
+            QueueUrl: cfg.transactionsQueueUrl,
+            ReceiptHandle: message.ReceiptHandle,
+          }),
+        );
+        return { type: 'ack' };
+      }
+    }
+    const ordered = new Recording(sqs, cfg, submit, logger);
+    for (const [body, group] of [
+      ['g1-m1', 'g1'],
+      ['g1-m2', 'g1'],
+      ['g2-m1', 'g2'],
+    ] as const) {
+      await sqs.send(
+        new SendMessageCommand({
+          QueueUrl: cfg.transactionsQueueUrl,
+          MessageBody: body,
+          MessageGroupId: group,
+          MessageDeduplicationId: Bun.randomUUIDv7(),
+        }),
+      );
+    }
+    ordered.start();
+    await waitFor(() => Promise.resolve(seen.includes('g1-m2') && seen.includes('g2-m1')));
+    await ordered.stop();
+
+    const firstM1 = seen.indexOf('g1-m1');
+    const secondM1 = seen.lastIndexOf('g1-m1');
+    expect(secondM1).toBeGreaterThan(firstM1);
+    // g1-m2 só depois da 2ª tentativa (bem-sucedida) de g1-m1.
+    expect(seen.indexOf('g1-m2')).toBeGreaterThan(secondM1);
+    // Outro grupo não é bloqueado pelo retry de g1.
+    expect(seen).toContain('g2-m1');
   });
 });

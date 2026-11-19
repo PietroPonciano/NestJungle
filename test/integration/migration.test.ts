@@ -44,11 +44,14 @@ describe('Migrations (PostgreSQL real)', () => {
     ];
     expect(await tables()).toEqual(all);
 
-    await orm.migrator.down();
+    // Reverte TODAS as migrations, uma a uma, na ordem inversa.
+    await orm.migrator.down({ to: 0 });
     expect(await tables()).toEqual([]);
     const c = await pgClient();
     try {
-      const fn = await c.query("SELECT 1 FROM pg_proc WHERE proname = 'block_ledger_mutation'");
+      const fn = await c.query(
+        "SELECT 1 FROM pg_proc WHERE proname IN ('block_ledger_mutation', 'guard_wager_transaction_update', 'block_wager_transaction_removal')",
+      );
       expect(fn.rowCount).toBe(0);
     } finally {
       await c.end();
