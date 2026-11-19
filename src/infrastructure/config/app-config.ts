@@ -34,6 +34,8 @@ export interface AppConfig {
     batchSize: number;
     retryMaxSeconds: number;
     lagAlertAttempts: number;
+    /** Intervalo de amostragem das métricas outbox_pending_total e outbox_lag_seconds. */
+    metricsIntervalMs: number;
   };
   pendingReference: {
     ttlSeconds: number;
@@ -70,6 +72,14 @@ function int(env: Env, key: string, fallback: number): number {
   const value = Number.parseInt(raw, 10);
   if (!Number.isSafeInteger(value) || value < 0 || String(value) !== raw.trim()) {
     throw new Error(`Variável ${key} deve ser inteiro não negativo: "${raw}"`);
+  }
+  return value;
+}
+
+function intAtLeast(env: Env, key: string, fallback: number, min: number): number {
+  const value = int(env, key, fallback);
+  if (value < min) {
+    throw new Error(`Variável ${key} deve ser inteiro >= ${String(min)}: "${String(value)}"`);
   }
   return value;
 }
@@ -124,6 +134,8 @@ export function loadConfig(env: Env = process.env): AppConfig {
       batchSize: int(env, 'OUTBOX_BATCH_SIZE', 50),
       retryMaxSeconds: int(env, 'OUTBOX_RETRY_MAX_SECONDS', 300),
       lagAlertAttempts: int(env, 'OUTBOX_LAG_ALERT_ATTEMPTS', 10),
+      // Mínimo de 100 ms: com 0 o laço de amostragem viraria espera ocupada.
+      metricsIntervalMs: intAtLeast(env, 'OUTBOX_METRICS_INTERVAL_MS', 5000, 100),
     },
     pendingReference: {
       ttlSeconds: int(env, 'PENDING_REFERENCE_TTL_SECONDS', 3600),

@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { INestApplication } from '@nestjs/common';
 import { createApp } from '../../src/bootstrap';
 import { JsonLogger } from '../../src/shared/logger';
-import { resetDatabase, testConfig } from '../support/database';
+import { pgClient, resetDatabase, testConfig } from '../support/database';
 import { waitFor } from '../support/instances';
 import { drain, testSqs } from '../support/sqs';
 
@@ -28,6 +28,7 @@ beforeAll(async () => {
       WORKERS_ENABLED: 'true',
       SQS_WAIT_TIME_SECONDS: '1',
       OUTBOX_POLL_INTERVAL_MS: '100',
+      OUTBOX_METRICS_INTERVAL_MS: '100',
     }),
     { logger },
   ));
@@ -147,5 +148,34 @@ describe('Observabilidade', () => {
     expect(text).toMatch(/wager_processing_duration_seconds_count\{source="http"\} [1-9]/);
     expect(text).toMatch(/outbox_pending_total \d+/);
     expect(text).toMatch(/outbox_lag_seconds \d/);
+  });
+
+  test('pendentes e lag da outbox são amostrados por um laço próprio, sem depender de publicação', async () => {
+    // Evento pendente que o publisher ainda não pode pegar (next_attempt_at no
+    // futuro): só o laço de métricas o enxerga.
+    const c = await pgClient();
+    const id = Bun.randomUUIDv7();
+    try {
+      await c.query(
+        `INSERT INTO outbox_messages (id, aggregate_id, event_type, payload, occurred_at, next_attempt_at)
+         VALUES ($1, $2, 'Test', '{}'::jsonb, now() - interval '60 seconds', now() + interval '1 hour')`,
+        [id, Bun.randomUUIDv7()],
+      );
+      const gauge = (text: string, name: string) =>
+        Number(new RegExp(`^${name} (\\S+)$`, 'm').exec(text)?.[1] ?? 'NaN');
+      await waitFor(
+        async () => {
+          const text = await (await fetch(`${base}/metrics`)).text();
+          return (
+            gauge(text, 'outbox_pending_total') >= 1 && gauge(text, 'outbox_lag_seconds') >= 59
+          );
+        },
+        5_000,
+        'métricas da outbox atualizadas',
+      );
+    } finally {
+      await c.query('DELETE FROM outbox_messages WHERE id = $1', [id]);
+      await c.end();
+    }
   });
 });

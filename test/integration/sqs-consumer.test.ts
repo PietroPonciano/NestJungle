@@ -2,7 +2,12 @@
  * Etapa 13 — consumidor SQS com inbox sobre LocalStack e PostgreSQL REAIS.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { ReceiveMessageCommand, SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs';
+import {
+  DeleteMessageCommand,
+  ReceiveMessageCommand,
+  SendMessageCommand,
+  type SQSClient,
+} from '@aws-sdk/client-sqs';
 import type { MikroORM } from '@mikro-orm/postgresql';
 import type { Client } from 'pg';
 import { SubmitWagerTransactionUseCase } from '../../src/application/use-cases/submit-wager-transaction';
@@ -22,6 +27,7 @@ let sqs: SQSClient;
 let cfg: AppConfig['sqs'];
 let s: ReturnType<typeof buildServices>;
 let consumer: SqsWagerConsumer;
+let submit: SubmitWagerTransactionUseCase;
 const retries = { count: 0 };
 const dlqReasons: string[] = [];
 const logger = new JsonLogger('error');
@@ -34,7 +40,7 @@ beforeAll(async () => {
   cfg = { ...t.config, waitTimeSeconds: 1, retryBaseSeconds: 1, retryMaxSeconds: 2 };
   s = buildServices(orm);
   // lock_timeout curto: espera por lock vira transitório rapidamente.
-  const submit = new SubmitWagerTransactionUseCase(
+  submit = new SubmitWagerTransactionUseCase(
     new MikroOrmUnitOfWork(orm, 300),
     s.ids,
     s.clock,
@@ -329,5 +335,84 @@ describe('Consumidor SQS', () => {
       1,
     );
     expect(await balance(w.id)).toBe('90.00');
+  });
+
+  test('limite de tentativas vem da RedrivePolicy da fila, não de um SQS_MAX_RECEIVE_COUNT divergente', async () => {
+    const reasons: string[] = [];
+    let retried = 0;
+    const divergent = new SqsWagerConsumer(sqs, { ...cfg, maxReceiveCount: 2 }, submit, logger, {
+      onRetry: () => {
+        retried += 1;
+      },
+      onDeadLetter: (reason) => {
+        reasons.push(reason);
+      },
+      onProcessingTime: () => undefined,
+    });
+    expect(divergent.effectiveMaxReceiveCount).toBe(2);
+    await divergent.syncRedrivePolicy();
+    expect(divergent.effectiveMaxReceiveCount).toBe(5); // redrive das filas de teste
+
+    // Mesmo cenário transitório do teste E4, mas na 2ª entrega de 5.
+    const w = await wallet('100.00');
+    const bet = body(w);
+    await submit.execute(parseWagerMessage(JSON.stringify(bet)).command, { correlationId: 't' });
+    const holder = await pgClient();
+    await holder.query('BEGIN');
+    await holder.query(
+      'SELECT 1 FROM wager_transactions WHERE external_transaction_id = $1 FOR UPDATE',
+      [bet.data.externalTransactionId],
+    );
+    let receiptHandle: string | undefined;
+    try {
+      await send(
+        body(w, { kind: 'REFUND', referenceExternalTransactionId: bet.data.externalTransactionId }),
+        w.id,
+      );
+      const received = await sqs.send(
+        new ReceiveMessageCommand({
+          QueueUrl: cfg.transactionsQueueUrl,
+          WaitTimeSeconds: 2,
+          MessageSystemAttributeNames: ['All'],
+        }),
+      );
+      const message = received.Messages?.[0];
+      if (message === undefined) throw new Error('mensagem não recebida');
+      receiptHandle = message.ReceiptHandle;
+      message.Attributes = { ...message.Attributes, ApproximateReceiveCount: '2' };
+      await divergent.handle(message);
+    } finally {
+      await holder.query('ROLLBACK');
+      await holder.end();
+      // A mensagem voltou para a fila com backoff: removida para não vazar ao próximo teste.
+      if (receiptHandle !== undefined) {
+        await sqs.send(
+          new DeleteMessageCommand({
+            QueueUrl: cfg.transactionsQueueUrl,
+            ReceiptHandle: receiptHandle,
+          }),
+        );
+      }
+    }
+    // Com o limite da config (2) isto viraria FAILED terminal; com o da fila (5), é retry.
+    expect(reasons).toEqual([]);
+    expect(retried).toBe(1);
+    expect(await txCount(w.id, "status = 'FAILED'")).toBe(0);
+    expect(await balance(w.id)).toBe('90.00');
+  });
+
+  test('fila inacessível ao ler a RedrivePolicy: mantém o limite da config', async () => {
+    const unreachable = new SqsWagerConsumer(
+      sqs,
+      {
+        ...cfg,
+        maxReceiveCount: 3,
+        transactionsQueueUrl: `${cfg.transactionsQueueUrl.replace(/\/[^/]+$/, '')}/fila-inexistente.fifo`,
+      },
+      submit,
+      logger,
+    );
+    await unreachable.syncRedrivePolicy();
+    expect(unreachable.effectiveMaxReceiveCount).toBe(3);
   });
 });

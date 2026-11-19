@@ -209,7 +209,7 @@ Um único `HttpExceptionFilter` faz o mapeamento de exceções; 201/200/202/422/
 
 - Long polling; mesmo use case do HTTP; inbox por `(consumerName, messageId)`.
 - **Ack somente após o commit.** O SQS não tem NACK: retry = não apagar + `ChangeMessageVisibility` (backoff + jitter).
-- Limite de tentativas = `maxReceiveCount` da redrive (5), lido via `ApproximateReceiveCount`. Na última tentativa com erro transitório, grava `FAILED RETRY_LIMIT_EXCEEDED` se o banco aceitar e envia à DLQ; senão a redrive move a mensagem (E4).
+- Limite de tentativas = `maxReceiveCount` da redrive (5), comparado com o `ApproximateReceiveCount`. O consumidor lê a `RedrivePolicy` da fila ao iniciar (`GetQueueAttributes`), para não divergir dela; `SQS_MAX_RECEIVE_COUNT` só vale enquanto a fila não pôde ser consultada ou se ela não tiver redrive. Divergência é logada como `warn`. Na última tentativa com erro transitório, grava `FAILED RETRY_LIMIT_EXCEEDED` se o banco aceitar e envia à DLQ; senão a redrive move a mensagem (E4).
 - DLQ explícita: envia à DLQ **antes** do ack (crash no meio → reenvio com o mesmo dedup id, o FIFO deduplica), com atributo `failureReason`.
 - Mensagens do lote são processadas em sequência (o FIFO entrega em ordem por `MessageGroupId = walletId`); várias instâncias dividem os grupos.
 - **SIGTERM:** para de buscar, conclui a mensagem em andamento (commit + ack) e devolve as não iniciadas (`VisibilityTimeout 0`). O long poll **não é abortado** (E11).
@@ -236,7 +236,7 @@ Um único `HttpExceptionFilter` faz o mapeamento de exceções; 201/200/202/422/
 
 - **Logs JSON** (uma linha por evento) com `correlationId`, `messageId`, `transactionId`, `walletId`, `providerId`, status, duração. Sem corpo de requisição/mensagem nem valores monetários (um teste verifica que nenhum log contém `"amount"`).
 - **CorrelationId:** header `X-Correlation-Id` (ou gerado) → resposta → envelope dos eventos → log de publicação; no SQS, o `messageId` é o correlationId e o causationId. Teste ponta a ponta HTTP → transação → evento publicado.
-- **Métricas** (`GET /metrics`, Prometheus): `wager_transactions_total{kind,status}`, `wager_duplicates_total`, `wager_retries_total`, `wager_dlq_messages_total{reason}`, `wager_lock_conflicts_total`, `wager_processing_duration_seconds{source}` (histograma), `outbox_pending_total`, `outbox_lag_seconds`, `outbox_overdue_total`, `reconciliation_divergence_total` + métricas padrão do processo.
+- **Métricas** (`GET /metrics`, Prometheus): `wager_transactions_total{kind,status}`, `wager_duplicates_total`, `wager_retries_total`, `wager_dlq_messages_total{reason}`, `wager_lock_conflicts_total`, `wager_processing_duration_seconds{source}` (histograma), `outbox_pending_total`, `outbox_lag_seconds`, `outbox_overdue_total`, `reconciliation_divergence_total` + métricas padrão do processo. Pendentes e lag da outbox são amostrados por um laço próprio (`OUTBOX_METRICS_INTERVAL_MS`, padrão 5 s), fora do caminho de publicação: a contagem não roda depois de cada lote publicado.
 - **Health:** `/health/live` (processo, sem dependências) e `/health/ready` (`SELECT 1` + SQS alcançável; 503 se algum cair). Abertos.
 
 ---

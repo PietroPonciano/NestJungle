@@ -14,6 +14,8 @@
  *      transitório                          -> sem ack; retry com backoff;
  *                                              na última tentativa grava FAILED
  *                                              RETRY_LIMIT_EXCEEDED (E4) e manda à DLQ
+ *                                              (limite = maxReceiveCount da
+ *                                              RedrivePolicy da fila)
  *      payload inválido / wallet inexistente
  *      / conflito de idempotência ou inbox  -> DLQ explícita + ack (sem linha)
  *      FAILED (erro permanente gravado)     -> DLQ explícita + ack
@@ -26,6 +28,7 @@
 import {
   ChangeMessageVisibilityCommand,
   DeleteMessageCommand,
+  GetQueueAttributesCommand,
   type Message,
   ReceiveMessageCommand,
   SendMessageCommand,
@@ -48,6 +51,7 @@ import {
 } from '../../interfaces/messaging/wager-message';
 import type { AppLogger } from '../../shared/logger';
 import type { AppConfig } from '../config/app-config';
+import { parseRedriveMaxReceiveCount } from './redrive-policy';
 
 export interface ConsumerObserver {
   onRetry(): void;
@@ -69,6 +73,12 @@ type Disposition =
 export class SqsWagerConsumer {
   private running = false;
   private loop: Promise<void> | undefined;
+  /**
+   * Limite de entregas antes da DLQ. Começa com SQS_MAX_RECEIVE_COUNT e passa a
+   * ser o maxReceiveCount da RedrivePolicy da fila assim que ela é lida.
+   */
+  private maxReceiveCount: number;
+  private redriveSynced = false;
 
   constructor(
     private readonly sqs: SQSClient,
@@ -77,7 +87,56 @@ export class SqsWagerConsumer {
     private readonly logger: AppLogger,
     private readonly observer: ConsumerObserver = NOOP_OBSERVER,
     private readonly faults: AppConfig['faults'] = { crashAfterCommitBeforeAck: false },
-  ) {}
+  ) {
+    this.maxReceiveCount = config.maxReceiveCount;
+  }
+
+  /** Limite em uso (exposto para testes e diagnóstico). */
+  get effectiveMaxReceiveCount(): number {
+    return this.maxReceiveCount;
+  }
+
+  /**
+   * Alinha o limite de tentativas com a RedrivePolicy da fila (fonte da verdade
+   * do enunciado §10). Sem isso, SQS_MAX_RECEIVE_COUNT pode divergir da fila:
+   * menor, um erro transitório viraria FAILED RETRY_LIMIT_EXCEEDED (terminal)
+   * enquanto a fila ainda tentaria de novo; maior, a decisão E4 nunca rodaria.
+   * Se a fila não puder ser consultada, mantém o valor atual e o laço tenta de
+   * novo na próxima volta.
+   */
+  async syncRedrivePolicy(): Promise<void> {
+    let raw: string | undefined;
+    try {
+      const response = await this.sqs.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: this.config.transactionsQueueUrl,
+          AttributeNames: ['RedrivePolicy'],
+        }),
+      );
+      raw = response.Attributes?.RedrivePolicy;
+    } catch (error: unknown) {
+      this.logger.warn('não foi possível ler a RedrivePolicy da fila; mantendo o limite atual', {
+        maxReceiveCount: this.maxReceiveCount,
+        error: String(error),
+      });
+      return;
+    }
+    this.redriveSynced = true;
+    const fromQueue = parseRedriveMaxReceiveCount(raw);
+    if (fromQueue === undefined) {
+      this.logger.warn('fila sem RedrivePolicy válida; usando SQS_MAX_RECEIVE_COUNT', {
+        maxReceiveCount: this.maxReceiveCount,
+      });
+      return;
+    }
+    if (fromQueue !== this.config.maxReceiveCount) {
+      this.logger.warn('SQS_MAX_RECEIVE_COUNT difere da RedrivePolicy da fila; usando a fila', {
+        configured: this.config.maxReceiveCount,
+        queue: fromQueue,
+      });
+    }
+    this.maxReceiveCount = fromQueue;
+  }
 
   start(): void {
     if (this.running) return;
@@ -103,6 +162,7 @@ export class SqsWagerConsumer {
 
   private async pollLoop(): Promise<void> {
     while (this.running) {
+      if (!this.redriveSynced) await this.syncRedrivePolicy();
       let messages: Message[];
       try {
         const response = await this.sqs.send(
@@ -179,7 +239,7 @@ export class SqsWagerConsumer {
     log: AppLogger,
   ): Promise<Disposition> {
     if (error instanceof TransientInfrastructureError) {
-      if (receiveCount >= this.config.maxReceiveCount && parsed !== undefined) {
+      if (receiveCount >= this.maxReceiveCount && parsed !== undefined) {
         // E4: última tentativa permitida. Se o banco aceitar, registra FAILED auditável.
         const recorded = await this.submit.recordRetryLimitExceeded(parsed.command, {
           consumerName: this.config.consumerName,

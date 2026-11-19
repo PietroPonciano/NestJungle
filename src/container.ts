@@ -175,10 +175,25 @@ export async function buildContainer(config: AppConfig, logger?: AppLogger): Pro
         metrics.outboxOverdue.inc(report.overdue);
         log.warn('eventos da outbox acima do limite de tentativas', { overdue: report.overdue });
       }
+      return report.published > 0;
+    },
+    {
+      error: (msg, ctx) => {
+        log.error(msg, { error: String(ctx.error) });
+      },
+    },
+  );
+  // Pendentes e lag da outbox num laço próprio, a cada metricsIntervalMs. O
+  // COUNT/MIN percorre todos os pendentes; rodá-lo depois de cada lote
+  // publicado custava uma varredura por lote justamente quando há backlog.
+  const outboxMetricsWorker = new PollingWorker(
+    'outbox-metrics',
+    config.outbox.metricsIntervalMs,
+    async () => {
       const stats = await uow.run((s) => s.outbox.pendingStats(clock.now()));
       metrics.outboxPending.set(stats.pending);
       metrics.outboxLag.set(stats.oldestAgeSeconds);
-      return report.published > 0;
+      return false; // sempre espera o intervalo: é amostragem, não drenagem
     },
     {
       error: (msg, ctx) => {
@@ -205,7 +220,7 @@ export async function buildContainer(config: AppConfig, logger?: AppLogger): Pro
       },
     },
   );
-  const workers = new Workers(consumer, outboxWorker, [pendingWorker]);
+  const workers = new Workers(consumer, outboxWorker, [pendingWorker, outboxMetricsWorker]);
 
   return {
     config,
