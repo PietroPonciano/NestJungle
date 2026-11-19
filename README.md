@@ -13,6 +13,14 @@ A entrega é **at-least-once**: a mesma operação pode chegar duplicada, fora d
 
 ---
 
+## Apresentação
+
+https://github.com/user-attachments/assets/97e243b6-dcba-453d-b5cb-892e51a63d9a
+
+> Autor: [Pietro Ponciano](https://www.linkedin.com/in/pietro-gonçalves-ponciano/)
+
+---
+
 ## Sumário
 
 1. [Funcionalidades](#funcionalidades)
